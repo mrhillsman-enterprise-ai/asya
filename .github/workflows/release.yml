@@ -180,8 +180,8 @@ jobs:
   upload-crds:
     name: Upload CRDs to release
     runs-on: ubuntu-latest
-    # Must run on 'created' not 'published' - releases become immutable after publishing
-    if: github.event.action == 'created'
+    # Run on both 'created' (draft) and 'published' (direct publish) to handle both workflows
+    if: github.event.action == 'created' || github.event.action == 'published'
     permissions:
       contents: write
 
