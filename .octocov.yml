@@ -54,11 +54,10 @@ comment:
 
     **Legend:** `+` increase | `-` decrease | `~` no change
 
+# Diff comparison for PRs - optional baseline
+# On first run, octocov branch won't exist yet, so skip error gracefully
 diff:
   if: is_pull_request
-  datastores:
-  - github://deliveryhero/asya@octocov
-  path: report.json
 
 summary:
   if: is_default_branch
