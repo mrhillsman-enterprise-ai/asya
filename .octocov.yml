@@ -98,7 +98,9 @@ testExecutionTime:
 
 # Set coverage thresholds
 acceptable:
-  coverage: current >= 50%
+  coverage:
+  - current >= 50%
+  - diff >= 0
   codeToTestRatio: 1:1.2
 
 # Push metrics and badges to artifact storage
