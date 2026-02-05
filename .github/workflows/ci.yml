@@ -488,6 +488,7 @@ jobs:
 
         # Save report.json before switching branches
         cp report.json /tmp/report.json.tmp
+        rm report.json
 
         # Try to fetch existing octocov branch
         if git fetch origin octocov; then
