@@ -41,17 +41,26 @@ func (i *Injector) Inject(pod *corev1.Pod, actorConfig *ActorConfig) (*corev1.Po
 		sidecarImage = actorConfig.SidecarImage
 	}
 
+	// Determine sidecar image pull policy (per-actor override > global config)
+	sidecarImagePullPolicy := i.config.SidecarImagePullPolicy
+	if actorConfig.SidecarImagePullPolicy != "" {
+		sidecarImagePullPolicy = actorConfig.SidecarImagePullPolicy
+	}
+
 	// Socket path for sidecar-runtime communication
 	socketPath := i.config.SocketDir + "/asya-runtime.sock"
 
-	// Build sidecar environment variables
+	// Build sidecar environment variables and merge per-actor env
 	sidecarEnv := i.buildSidecarEnv(actorConfig)
+	for _, ev := range actorConfig.SidecarEnv {
+		sidecarEnv = appendOrReplaceEnv(sidecarEnv, ev)
+	}
 
 	// Create sidecar container
 	sidecar := corev1.Container{
 		Name:            sidecarContainerName,
 		Image:           sidecarImage,
-		ImagePullPolicy: corev1.PullPolicy(i.config.SidecarImagePullPolicy),
+		ImagePullPolicy: corev1.PullPolicy(sidecarImagePullPolicy),
 		Env:             sidecarEnv,
 		VolumeMounts: []corev1.VolumeMount{
 			{
@@ -299,6 +308,20 @@ func (i *Injector) addVolumes(pod *corev1.Pod) {
 			},
 		},
 	})
+}
+
+// appendOrReplaceEnv adds an env var, replacing any existing var with the same name.
+// Returns a new slice on replacement to avoid mutating the input's backing array.
+func appendOrReplaceEnv(envs []corev1.EnvVar, newEnv corev1.EnvVar) []corev1.EnvVar {
+	for i, e := range envs {
+		if e.Name == newEnv.Name {
+			out := make([]corev1.EnvVar, len(envs))
+			copy(out, envs)
+			out[i] = newEnv
+			return out
+		}
+	}
+	return append(envs, newEnv)
 }
 
 // appendEnvIfNotExists adds an env var if it doesn't already exist
