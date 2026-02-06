@@ -38,14 +38,13 @@ func TestInjector_Inject(t *testing.T) {
 	}
 
 	actorConfig := &ActorConfig{
-		ActorName:        "my-actor",
-		Namespace:        "default",
-		Transport:        "sqs",
-		QueueURL:         "http://sqs.localhost:4566/000000000000/asya-default-my-actor",
-		Handler:          "my_module.process",
-		HandlerMode:      "payload",
-		PythonExecutable: "python3",
-		Region:           "us-east-1",
+		ActorName:   "my-actor",
+		Namespace:   "default",
+		Transport:   "sqs",
+		QueueURL:    "http://sqs.localhost:4566/000000000000/asya-default-my-actor",
+		Handler:     "my_module.process",
+		HandlerMode: "payload",
+		Region:      "us-east-1",
 	}
 
 	mutated, err := injector.Inject(pod, actorConfig)
@@ -136,6 +135,85 @@ func TestInjector_Inject(t *testing.T) {
 	}
 	if runtime.ReadinessProbe == nil {
 		t.Error("readiness probe not added")
+	}
+}
+
+func TestInjector_InjectPythonExecutable(t *testing.T) {
+	tests := []struct {
+		name           string
+		envVars        []corev1.EnvVar
+		expectedPython string
+	}{
+		{
+			name: "custom python executable from env",
+			envVars: []corev1.EnvVar{
+				{Name: "ASYA_PYTHONEXECUTABLE", Value: "/usr/bin/python3.11"},
+			},
+			expectedPython: "/usr/bin/python3.11",
+		},
+		{
+			name:           "default python3 when env not set",
+			envVars:        nil,
+			expectedPython: "python3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				SidecarImage:           "ghcr.io/deliveryhero/asya-sidecar:test",
+				RuntimeConfigMap:       "asya-runtime",
+				SidecarImagePullPolicy: "IfNotPresent",
+				SocketDir:              "/var/run/asya",
+				RuntimeMountPath:       "/opt/asya/asya_runtime.py",
+			}
+
+			injector := NewInjector(cfg)
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "asya-runtime",
+							Image: "my-app:v1",
+							Env:   tt.envVars,
+						},
+					},
+				},
+			}
+
+			actorConfig := &ActorConfig{
+				ActorName: "my-actor",
+				Namespace: "default",
+				Transport: "sqs",
+				Region:    "us-east-1",
+			}
+
+			mutated, err := injector.Inject(pod, actorConfig)
+			if err != nil {
+				t.Fatalf("Inject failed: %v", err)
+			}
+
+			var runtime *corev1.Container
+			for i := range mutated.Spec.Containers {
+				if mutated.Spec.Containers[i].Name == "asya-runtime" {
+					runtime = &mutated.Spec.Containers[i]
+					break
+				}
+			}
+			if runtime == nil {
+				t.Fatal("runtime container not found")
+			}
+
+			expectedCommand := []string{tt.expectedPython, "/opt/asya/asya_runtime.py"}
+			if len(runtime.Command) != 2 || runtime.Command[0] != expectedCommand[0] || runtime.Command[1] != expectedCommand[1] {
+				t.Errorf("expected runtime command %v, got %v", expectedCommand, runtime.Command)
+			}
+		})
 	}
 }
 
