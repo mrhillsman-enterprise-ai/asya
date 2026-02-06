@@ -492,8 +492,10 @@ jobs:
 
         # Try to fetch existing octocov branch
         if git fetch origin octocov; then
-          # Branch exists - add to it
+          # Branch exists - clean and update it
           git checkout octocov
+          # Remove all files to keep octocov branch clean (only report.json)
+          git rm -rf . 2>/dev/null || true
           cp /tmp/report.json.tmp report.json
           git add report.json
           git commit -m "$COMMIT_MSG" || echo "[!] No changes to report"
@@ -501,6 +503,7 @@ jobs:
         else
           # New branch - create it
           git checkout --orphan octocov
+          git rm -rf . 2>/dev/null || true
           cp /tmp/report.json.tmp report.json
           git add report.json
           git commit -m "$COMMIT_MSG"
