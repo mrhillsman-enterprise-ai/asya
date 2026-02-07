@@ -40,6 +40,27 @@ def kubectl_apply(manifest_yaml: str, namespace: str = "asya-e2e") -> None:
     logger.debug(f"kubectl apply output: {result.stdout.decode()}")
 
 
+def kubectl_apply_raw(manifest_yaml: str, namespace: str = "asya-e2e") -> subprocess.CompletedProcess:
+    """
+    Apply a Kubernetes manifest and return the raw result without raising on failure.
+
+    Useful for testing admission rejection (e.g., invalid enum values in XRD).
+
+    Args:
+        manifest_yaml: YAML manifest as string
+        namespace: Target namespace
+
+    Returns:
+        subprocess.CompletedProcess with returncode, stdout, stderr
+    """
+    return subprocess.run(
+        ["kubectl", "apply", "-f", "-", "-n", namespace],
+        input=manifest_yaml.encode(),
+        capture_output=True,
+        timeout=30,
+    )
+
+
 def kubectl_delete(
     resource_type: str,
     name: str,
@@ -297,23 +318,22 @@ def wait_for_asyncactor_ready(
     name: str,
     namespace: str = "asya-e2e",
     timeout: int = 60,
-    required_conditions: list | None = None,
 ) -> bool:
     """
-    Wait for AsyncActor to be ready by checking status conditions.
+    Wait for AsyncActor to be ready by checking status.phase.
+
+    With Crossplane, the XR-level Ready condition may stay False even when the
+    actor is fully functional. Instead, check status.phase which is derived by
+    the Composition from actual infrastructure readiness (queue, KEDA, workload).
 
     Args:
         name: AsyncActor name
         namespace: Target namespace
         timeout: Maximum wait time in seconds
-        required_conditions: List of condition types that must be True (default: ["WorkloadReady"])
 
     Returns:
-        True if all required conditions are True, False if timeout
+        True if status.phase is "Ready", False if timeout
     """
-    if required_conditions is None:
-        required_conditions = ["WorkloadReady"]
-
     start_time = time.time()
     attempt = 0
 
@@ -333,24 +353,15 @@ def wait_for_asyncactor_ready(
 
             actor = yaml.safe_load(result.stdout)
             status = actor.get("status", {})
-            conditions = status.get("conditions", [])
+            phase = status.get("phase", "")
 
-            all_ready = True
-            for required_type in required_conditions:
-                condition = next((c for c in conditions if c["type"] == required_type), None)
-                if not condition or condition.get("status") != "True":
-                    all_ready = False
-                    break
-
-            if all_ready:
+            if phase == "Ready":
                 elapsed = time.time() - start_time
-                logger.info(
-                    f"AsyncActor {name} ready (conditions: {required_conditions}) after {elapsed:.1f}s ({attempt} attempts)"
-                )
+                logger.info(f"AsyncActor {name} ready (phase={phase}) after {elapsed:.1f}s ({attempt} attempts)")
                 return True
 
         except Exception as e:
-            logger.debug(f"Error checking AsyncActor conditions (attempt {attempt}): {e}")
+            logger.debug(f"Error checking AsyncActor status (attempt {attempt}): {e}")
 
         time.sleep(1)
 

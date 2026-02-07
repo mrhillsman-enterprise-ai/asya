@@ -27,7 +27,7 @@ spec:
             {{`{{- $claimName := index $xr.metadata.labels "crossplane.io/claim-name" -}}`}}
             {{`{{- $actorName := (index $xr.metadata.labels "asya.sh/actor") | default $claimName -}}`}}
             {{`{{- $region := $xr.spec.region | default "us-east-1" -}}`}}
-            {{`{{- $providerConfigRef := $xr.spec.providerConfigRef | default "default" -}}`}}
+            {{`{{- $providerConfigRef := $xr.spec.providerConfigRef | default "`}}{{ .Values.awsProviderConfig.name }}{{`" -}}`}}
             apiVersion: sqs.aws.upbound.io/v1beta1
             kind: Queue
             metadata:
@@ -320,6 +320,7 @@ spec:
                       metadata:
                         labels:
                           app.kubernetes.io/name: {{`{{ $actorName }}`}}
+                          app.kubernetes.io/component: actor
                           asya.sh/actor: {{`{{ $actorName }}`}}
                           asya.sh/inject: "true"
                       spec:
@@ -352,6 +353,15 @@ spec:
             {{`{{- $queueIdentifier := "" -}}`}}
             {{`{{- $queueReady := false -}}`}}
             {{`{{- $kedaReady := false -}}`}}
+            {{`{{- $scalingEnabled := true -}}`}}
+            {{`{{- if hasKey $xr.spec "scaling" -}}`}}
+              {{`{{- if hasKey $xr.spec.scaling "enabled" -}}`}}
+                {{`{{- $scalingEnabled = $xr.spec.scaling.enabled -}}`}}
+              {{`{{- end -}}`}}
+            {{`{{- end -}}`}}
+            {{`{{- if not $scalingEnabled -}}`}}
+              {{`{{- $kedaReady = true -}}`}}
+            {{`{{- end -}}`}}
             {{`{{- $workloadReplicas := 0 -}}`}}
             {{`{{- $workloadReadyReplicas := 0 -}}`}}
             {{`{{- if .observed.resources -}}`}}
