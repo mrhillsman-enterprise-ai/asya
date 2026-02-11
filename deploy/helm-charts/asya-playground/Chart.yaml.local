@@ -1,0 +1,52 @@
+# LOCAL DEVELOPMENT ONLY - Used by E2E tests (testing/e2e/)
+#
+# This file uses file:// dependencies to test unpublished chart changes.
+# To use: cp Chart.yaml.local Chart.yaml && helm dependency build .
+#
+# The main Chart.yaml uses https://asya.sh/charts for published versions.
+# DO NOT commit Chart.lock generated from this file - it will have file:// paths.
+#
+apiVersion: v2
+name: asya-playground
+description: Demo package for local development and testing with Asya. NOT for production use.
+type: application
+# versions don't matter in local
+version: 0.0.0
+appVersion: "0.0.0"
+keywords:
+- asya
+- actor
+- crossplane
+- injector
+- gateway
+- demo
+- quickstart
+maintainers:
+- name: Asya Team
+
+# Local dependencies (for development/testing with unpublished chart versions)
+dependencies:
+# KEDA is required for autoscaling - non-optional dependency
+- name: keda
+  version: ">=2.16.0"
+  repository: "https://kedacore.github.io/charts"
+# locally, use >=0.0.0 to match any version from local charts
+- name: asya-crossplane
+  version: ">=0.0.0"
+  repository: "file://../asya-crossplane"
+- name: asya-injector
+  version: ">=0.0.0"
+  repository: "file://../asya-injector"
+- name: asya-crew
+  version: ">=0.0.0"
+  repository: "file://../asya-crew"
+  condition: enableAsyaCrew
+- name: asya-gateway
+  version: ">=0.0.0"
+  repository: "file://../asya-gateway"
+  condition: enableAsyaGateway
+# Optional: Prometheus + Grafana monitoring stack
+- name: kube-prometheus-stack
+  version: ">=65.0.0"
+  repository: "https://prometheus-community.github.io/helm-charts"
+  condition: sampleMonitoring.enabled

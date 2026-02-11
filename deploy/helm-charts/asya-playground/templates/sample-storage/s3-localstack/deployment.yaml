@@ -1,0 +1,43 @@
+{{- if and .Values.sampleStorage.s3Localstack.enabled (eq .Values.global.storage "s3") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: s3-localstack
+  namespace: {{ include "asya-playground.namespace.infra" . }}
+  labels:
+    app: s3-localstack
+    app.kubernetes.io/name: s3-localstack
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: sample-storage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: s3-localstack
+  template:
+    metadata:
+      labels:
+        app: s3-localstack
+    spec:
+      containers:
+      - name: localstack
+        image: {{ .Values.sampleStorage.s3Localstack.image.repository }}:{{ .Values.sampleStorage.s3Localstack.image.tag }}
+        ports:
+        - containerPort: 4566
+          name: edge
+        env:
+        - name: SERVICES
+          value: "s3"
+        - name: DEBUG
+          value: "0"
+        - name: DATA_DIR
+          value: /tmp/localstack/data
+        resources:
+          {{- toYaml .Values.sampleStorage.s3Localstack.resources | nindent 10 }}
+        readinessProbe:
+          httpGet:
+            path: /_localstack/health
+            port: 4566
+          initialDelaySeconds: 10
+          periodSeconds: 5
+{{- end }}

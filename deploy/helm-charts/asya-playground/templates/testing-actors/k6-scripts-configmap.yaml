@@ -1,0 +1,48 @@
+{{- if .Values.k6LoadTests.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k6-load-test-scripts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: k6-scripts
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  sqs-load-test.js: |
+    import { AWSConfig, SQSClient } from 'https://jslib.k6.io/aws/0.12.3/sqs.js';
+    import { check, sleep } from 'k6';
+
+    export const options = {
+      vus: 20,
+      duration: '5m',
+    };
+
+    const awsConfig = new AWSConfig({
+      region: __ENV.AWS_REGION,
+      accessKeyId: __ENV.AWS_ACCESS_KEY_ID,
+      secretAccessKey: __ENV.AWS_SECRET_ACCESS_KEY,
+      endpoint: __ENV.SQS_ENDPOINT,
+    });
+
+    const sqs = new SQSClient(awsConfig);
+    const actors = ['chaos-slow', 'chaos-flaky', 'chaos-cpu', 'chaos-fanout'];
+
+    export default function() {
+      const actor = actors[Math.floor(Math.random() * actors.length)];
+      const queueUrl = `${__ENV.SQS_ENDPOINT}/000000000000/asya-${__ENV.ASYA_NAMESPACE}-${actor}`;
+
+      const envelope = {
+        id: `k6-${__VU}-${__ITER}`,
+        route: { actors: [actor], current: 0 },
+        payload: { test: 'k6', vu: __VU, iteration: __ITER },
+      };
+
+      try {
+        sqs.sendMessage(queueUrl, JSON.stringify(envelope));
+        check(null, { 'message sent': () => true });
+      } catch (error) {
+        console.error(`Send failed: ${error}`);
+      }
+      sleep(1);
+    }
+{{- end }}

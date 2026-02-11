@@ -1,0 +1,21 @@
+{{- if and .Values.sampleTransport.sqsLocalstack.enabled (eq .Values.global.transport "sqs") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: localstack-sqs
+  namespace: {{ include "asya-playground.namespace.infra" . }}
+  labels:
+    app: localstack-sqs
+    app.kubernetes.io/name: localstack-sqs
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: sample-transport
+spec:
+  type: {{ .Values.sampleTransport.sqsLocalstack.service.type }}
+  ports:
+  - port: {{ .Values.sampleTransport.sqsLocalstack.service.port }}
+    targetPort: edge
+    protocol: TCP
+    name: edge
+  selector:
+    app: localstack-sqs
+{{- end }}

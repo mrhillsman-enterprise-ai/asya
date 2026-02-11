@@ -10,6 +10,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Format: "source_file|symlink1 symlink2 ..."
 SYMLINK_MAPPINGS=(
   "src/asya-runtime/asya_runtime.py|deploy/helm-charts/asya-crossplane/files/asya_runtime.py"
+  "deploy/grafana-dashboards/asya-actors-overview.json|deploy/helm-charts/asya-playground/files/asya-actors-overview.json"
 )
 
 EXIT_CODE=0

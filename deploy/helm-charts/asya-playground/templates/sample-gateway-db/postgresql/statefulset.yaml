@@ -1,0 +1,78 @@
+{{- if .Values.sampleGatewayDb.postgresql.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-asya-gateway-postgresql
+  namespace: {{ include "asya-playground.namespace.infra" . }}
+  labels:
+    app: {{ .Release.Name }}-postgresql
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-15"
+    "helm.sh/resource-policy": keep
+spec:
+  serviceName: {{ .Release.Name }}-asya-gateway-postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-postgresql
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-postgresql
+    spec:
+      containers:
+      - name: postgresql
+        image: {{ .Values.sampleGatewayDb.postgresql.image.repository }}:{{ .Values.sampleGatewayDb.postgresql.image.tag }}
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_USER
+          value: {{ .Values.sampleGatewayDb.postgresql.auth.username }}
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-asya-gateway-postgresql
+              key: password
+        - name: POSTGRES_DB
+          value: {{ .Values.sampleGatewayDb.postgresql.auth.database }}
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U {{ .Values.sampleGatewayDb.postgresql.auth.username }}
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 6
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U {{ .Values.sampleGatewayDb.postgresql.auth.username }}
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        resources:
+          {{- toYaml .Values.sampleGatewayDb.postgresql.resources | nindent 10 }}
+      volumes:
+{{- if not .Values.sampleGatewayDb.postgresql.persistence.enabled }}
+      - name: data
+        emptyDir: {}
+{{- else }}
+      - name: data
+        persistentVolumeClaim:
+          claimName: {{ .Release.Name }}-asya-gateway-postgresql-data
+{{- end }}
+{{- end }}

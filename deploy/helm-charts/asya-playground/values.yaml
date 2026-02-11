@@ -1,0 +1,473 @@
+# Asya Quickstart - Full demo package showing Asya🎭 in action
+# This chart deploys a complete Asya environment with sample infrastructure
+#
+# QUICKSTART (LOCAL): Uses sample infrastructure (LocalStack, sample PostgreSQL)
+# PRODUCTION: Disable sample infrastructure, configure external services below
+
+# Global settings
+global:
+  # Transport type: sqs, rabbitmq, or any other supported transport
+  transport: sqs
+
+  # Storage type: s3, minio
+  storage: s3
+
+  # Profile: local (with sample infra) or production (cloud services)
+  # - local: Enables sample infrastructure deployments
+  # - production: User must configure external services (see comments below)
+  profile: local
+
+# Namespace configuration
+# By default, all components deploy to the release namespace
+# Override these to separate concerns across namespaces
+#
+# Example with namespace separation:
+#   kubectl create namespace monitoring
+#   kubectl create namespace asya-infra
+#   helm install asya . -n asya-demo --create-namespace \
+#     --set namespaces.monitoring=monitoring \
+#     --set namespaces.infra=asya-infra \
+#     --set kube-prometheus-stack.namespaceOverride=monitoring
+#
+# This deploys:
+#   - asya-demo: Crossplane, Injector, Gateway, Crew, Actors, KEDA
+#   - monitoring: Prometheus, Grafana, dashboards, PodMonitors
+#   - asya-infra: LocalStack SQS, S3, MinIO, PostgreSQL
+namespaces:
+  # Namespace for monitoring resources (dashboard ConfigMap, PodMonitor)
+  # Note: To deploy Prometheus/Grafana here, also set kube-prometheus-stack.namespaceOverride
+  monitoring: ""
+  # Namespace for sample infrastructure (LocalStack, MinIO, PostgreSQL)
+  infra: ""
+
+# Component toggles
+enableAsyaCrew: true
+enableAsyaGateway: true
+
+# Test hello-world actor
+helloActor:
+  enabled: false
+  name: hello
+  image:
+    repository: python
+    tag: "3.13-slim"
+  handler: "hello_handler.process"
+  handlerMode: "payload"
+  scaling:
+    minReplicas: 0
+    maxReplicas: 10
+    queueLength: 5
+    pollingInterval: 30
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# Sample infrastructure for demos/testing
+# WARNING: Sample infrastructure is for demos only, use cloud services in production
+#
+# To use external/managed services:
+# 1. Set sampleTransport.*.enabled: false (disable sample deployments)
+# 2. Set sampleStorage.*.enabled: false (disable sample deployments)
+# 3. Set sampleGatewayDb.postgresql.enabled: false (disable sample PostgreSQL)
+# 4. Configure external endpoints in asya-crossplane.awsProviderConfig
+# 5. Configure external endpoints in asya-crew.storage.*
+# 6. Configure external database in asya-gateway.externalDatabase
+#
+sampleTransport:
+  # LocalStack for SQS (demo only)
+  # For production: Set enabled: false and configure asya-crossplane.awsProviderConfig below
+  sqsLocalstack:
+    enabled: true
+    image:
+      repository: localstack/localstack
+      tag: "3.1"
+    service:
+      type: ClusterIP
+      port: 4566
+    auth:
+      accessKeyId: "test"
+      secretAccessKey: "test"
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  # RabbitMQ (demo only)
+  # For production: Set enabled: false and configure transport settings below
+  rabbitmq:
+    enabled: false
+    image:
+      repository: rabbitmq
+      tag: "3.13-management"
+    service:
+      type: ClusterIP
+      amqpPort: 5672
+      managementPort: 15672
+    auth:
+      username: guest
+      password: guest
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+sampleStorage:
+  # LocalStack for S3 (demo only)
+  # For production: Set enabled: false and configure asya-crew.storage.s3 below
+  s3Localstack:
+    enabled: true
+    image:
+      repository: localstack/localstack
+      tag: "3.1"
+    service:
+      type: ClusterIP
+      port: 4566
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  # MinIO (demo only)
+  # For production: Set enabled: false and configure asya-crew.storage.minio below
+  minio:
+    enabled: false
+    image:
+      repository: minio/minio
+      tag: "latest"
+    service:
+      type: ClusterIP
+      apiPort: 9000
+      consolePort: 9001
+    auth:
+      rootUser: minioadmin
+      rootPassword: minioadmin
+    persistence:
+      enabled: true
+      size: 10Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+sampleMonitoring:
+  # Prometheus + Grafana stack (demo/development only)
+  # For production: Set enabled: false and use your existing monitoring infrastructure
+  # When enabled, deploys kube-prometheus-stack with pre-configured Asya dashboards
+  enabled: true
+
+sampleGatewayDb:
+  # PostgreSQL for gateway (sample deployment)
+  # For production: Set enabled: false and configure asya-gateway.externalDatabase below
+  postgresql:
+    enabled: false
+    image:
+      repository: postgres
+      tag: "15-alpine"
+    service:
+      type: ClusterIP
+      port: 5432
+    auth:
+      database: asya_gateway
+      username: asya
+      password: asya-db-password
+    persistence:
+      enabled: true
+      size: 2Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+
+# Crossplane configuration (passed to asya-crossplane chart)
+# Manages AsyncActor CRDs, Compositions, and Crossplane providers
+asya-crossplane:
+  providerConfigs:
+    install: false # Set to true after Crossplane providers are healthy (two-step install)
+  awsProviderConfig:
+    name: localstack
+    credentialsSource: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: aws-creds
+      key: credentials
+    endpoint:
+      enabled: true
+      url: "" # Set dynamically via helpers
+      hostnameImmutable: true
+    skipCredentialsValidation: true
+    skipMetadataApiCheck: true
+    skipRequestingAccountId: true
+    skipRegionValidation: true
+    s3UsePathStyle: true
+  awsRegion: us-east-1
+  awsAccountId: "000000000000"
+  actorNamespace: "" # defaults to release namespace
+  irsa:
+    enabled: false
+  keda:
+    authProvider: secret
+    secretRef:
+      name: aws-creds
+      accessKeyIdKey: AWS_ACCESS_KEY_ID
+      secretAccessKeyKey: AWS_SECRET_ACCESS_KEY
+
+# Injector configuration (passed to asya-injector chart)
+# Mutating webhook that injects asya-sidecar into actor pods
+asya-injector:
+  config:
+    sidecarImage: ghcr.io/deliveryhero/asya-sidecar:latest
+    sqsEndpoint: "" # Set dynamically via helpers
+    gatewayURL: "" # Set dynamically via helpers
+    awsCredsSecret: aws-creds
+
+# Crew configuration (passed to asya-crew chart)
+# Uncomment and modify values below to override chart defaults
+asya-crew:
+  # image:
+  #   repository: ghcr.io/deliveryhero/asya-crew
+  #   tag: "latest"
+
+  # Crew actors need transport configuration
+  # These MUST match the global.transport setting
+  happy-end:
+    transport: sqs
+    sidecar:
+      env:
+      - name: AWS_ACCESS_KEY_ID
+        value: "test"
+      - name: AWS_SECRET_ACCESS_KEY
+        value: "test"
+      - name: AWS_REGION
+        value: "us-east-1"
+
+  error-end:
+    transport: sqs
+    sidecar:
+      env:
+      - name: AWS_ACCESS_KEY_ID
+        value: "test"
+      - name: AWS_SECRET_ACCESS_KEY
+        value: "test"
+      - name: AWS_REGION
+        value: "us-east-1"
+
+  # Storage configurations (ACTIVELY USED - configure for your environment)
+  # These will be enabled/disabled based on global.storage
+  storage:
+    # S3 storage configuration
+    # For AWS S3: Set endpoint: "", update credentials, disable sampleStorage.s3Localstack
+    s3:
+      endpoint: http://s3-localstack:4566
+      bucket: asya-results
+      region: us-east-1
+      accessKeyId: test
+      secretAccessKey: test
+      forcePathStyle: true
+
+    # MinIO storage configuration
+    # For external MinIO: Update endpoint/credentials, disable sampleStorage.minio
+    minio:
+      endpoint: http://minio:9000
+      bucket: asya-results
+      accessKeyId: minioadmin
+      secretAccessKey: minioadmin
+      forcePathStyle: true
+
+# Gateway configuration (passed to asya-gateway chart)
+# Uncomment and modify values below to override chart defaults
+asya-gateway:
+  # replicaCount: 1
+  # image:
+  #   repository: ghcr.io/deliveryhero/asya-gateway
+  #   tag: "latest"
+  # service:
+  #   type: ClusterIP
+  #   port: 80
+  # config:
+  #   port: "8080"
+  #   rabbitmqURL: ""
+  #   sqsEndpoint: ""
+  #   sqsRegion: ""
+
+  # Gateway routes configuration (ACTIVELY USED - configure your tools/routes)
+  routes:
+    createConfigMap: true
+    defaults:
+      progress: true
+      timeout: 30
+    tools:
+    - name: hello
+      description: "Test hello-world actor"
+      parameters:
+        name:
+          type: string
+          required: true
+          description: "Name to greet"
+      route: ["hello"]
+
+  # PostgreSQL connection (ACTIVELY USED - configure database)
+  # Uses bundled PostgreSQL by default (asya-gateway-postgresql service)
+  # For external PostgreSQL: Set sampleGatewayDb.postgresql.enabled: false and configure externalDatabase below
+  externalDatabase:
+    host: asya-gateway-postgresql
+    port: 5432
+    database: asya_gateway
+    username: asya
+    password: asya-db-password
+
+# Prometheus + Grafana configuration (passed to kube-prometheus-stack chart)
+# Only used when sampleMonitoring.enabled: true
+# Minimal configuration optimized for local development
+#
+# To deploy monitoring in a separate namespace, set:
+#   kube-prometheus-stack.namespaceOverride: monitoring
+# Note: The namespace must exist before install
+kube-prometheus-stack:
+  # Override namespace for monitoring stack (default: release namespace)
+  # Set to "monitoring" to deploy in dedicated namespace
+  namespaceOverride: ""
+  # Shorten default names (default: kube-prometheus-stack)
+  fullnameOverride: asya-monitoring
+  cleanPrometheusOperatorObjectNames: true
+
+  # Prometheus configuration
+  prometheus:
+    prometheusSpec:
+      # Scrape all ServiceMonitors in all namespaces
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      # Reduce resource usage for local development
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+      # Minimal retention for demos
+      retention: 24h
+      retentionSize: 1GB
+
+  # Grafana configuration
+  grafana:
+    # Admin credentials for local development
+    adminPassword: asya-admin
+    # Enable sidecar for dashboard auto-discovery
+    sidecar:
+      dashboards:
+        enabled: true
+        searchNamespace: ALL
+        # Look for ConfigMaps with this label
+        label: grafana_dashboard
+        labelValue: "1"
+        folderAnnotation: grafana_folder
+        provider:
+          foldersFromFilesStructure: true
+    # Reduce resource usage
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+  # Disable components not needed for Asya demos
+  alertmanager:
+    enabled: false
+  kubeStateMetrics:
+    enabled: true
+  nodeExporter:
+    enabled: false
+  kubeApiServer:
+    enabled: false
+  kubelet:
+    enabled: false
+  kubeControllerManager:
+    enabled: false
+  coreDns:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeProxy:
+    enabled: false
+
+# Testing actors with chaos/failure modes
+# These actors simulate various production scenarios for testing autoscaling and resilience
+testingActors:
+  enabled: false
+  image:
+    repository: python
+    tag: "3.13-slim"
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  scaling:
+    enabled: true
+    minReplicas: 0
+    maxReplicas: 10
+    pollingInterval: 15
+    queueLength: 5
+  slow:
+    minDelay: "0.1"
+    maxDelay: "2.0"
+  flaky:
+    errorRate: "0.2"
+  cpu:
+    iterations: "500000"
+  fanout:
+    count: "3"
+
+
+# k6 Load Testing (CNCF-native, uses standard grafana/k6 image)
+k6LoadTests:
+  enabled: false
+
+  image:
+    repository: grafana/k6
+    tag: "0.54.0"
+
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+
+  prometheusUrl: "http://asya-kube-prometheus-stack-prometheus:9090/api/v1/write"
+
+  sqs:
+    enabled: true
+    endpoint: "http://localstack-sqs:4566"
+    awsRegion: "us-east-1"
+    awsAccessKeyId: "testlocalstackkey123"
+    awsSecretAccessKey: "testlocalstacksecret123456"
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+    requests:
+      cpu: 200m
+      memory: 256Mi

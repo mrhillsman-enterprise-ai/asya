@@ -1,0 +1,43 @@
+apiVersion: v2
+name: asya-playground
+description: Demo package for local development and testing with Asya. NOT for production use.
+type: application
+# versions are replaced by automatically .github/workflows/release.yml
+version: 0.0.0
+appVersion: "0.0.0"
+keywords:
+- asya
+- actor
+- crossplane
+- injector
+- gateway
+- demo
+- quickstart
+maintainers:
+- name: Asya Team
+
+# Remote dependencies (from published Helm repository)
+dependencies:
+# KEDA is required for autoscaling - non-optional dependency
+- name: keda
+  version: ">=2.16.0"
+  repository: "https://kedacore.github.io/charts"
+- name: asya-crossplane
+  version: ">=0.1.0"
+  repository: "https://asya.sh/charts"
+- name: asya-injector
+  version: ">=0.1.0"
+  repository: "https://asya.sh/charts"
+- name: asya-crew
+  version: ">=0.4.0"
+  repository: "https://asya.sh/charts"
+  condition: enableAsyaCrew
+- name: asya-gateway
+  version: ">=0.4.0"
+  repository: "https://asya.sh/charts"
+  condition: enableAsyaGateway
+# Optional: Prometheus + Grafana monitoring stack
+- name: kube-prometheus-stack
+  version: ">=65.0.0"
+  repository: "https://prometheus-community.github.io/helm-charts"
+  condition: sampleMonitoring.enabled

@@ -1,0 +1,21 @@
+{{- if and .Values.sampleStorage.s3Localstack.enabled (eq .Values.global.storage "s3") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: s3-localstack
+  namespace: {{ include "asya-playground.namespace.infra" . }}
+  labels:
+    app: s3-localstack
+    app.kubernetes.io/name: s3-localstack
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: sample-storage
+spec:
+  type: {{ .Values.sampleStorage.s3Localstack.service.type }}
+  ports:
+  - port: {{ .Values.sampleStorage.s3Localstack.service.port }}
+    targetPort: edge
+    protocol: TCP
+    name: edge
+  selector:
+    app: s3-localstack
+{{- end }}
