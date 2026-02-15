@@ -20,12 +20,38 @@ from asya_cli.flow.ir import (
 )
 
 
+# Parameter names accepted in flow function signatures.
+# The canonical name used in generated code is "p".
+VALID_PARAM_NAMES = ("p", "payload", "state")
+
+# Function definition types (sync and async)
+_FUNC_DEF_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+class _ParamNormalizer(ast.NodeTransformer):
+    """Rename flow parameter references to the canonical name 'p'.
+
+    Generated router code uses ``p = message['payload']``, so all
+    mutations and condition tests must reference ``p``.  This transformer
+    rewrites the AST *before* unparsing so downstream code stays simple.
+    """
+
+    def __init__(self, old_name: str) -> None:
+        self.old_name = old_name
+
+    def visit_Name(self, node: ast.Name) -> ast.Name:  # noqa: N802
+        if node.id == self.old_name:
+            node.id = "p"
+        return node
+
+
 class FlowParser:
     def __init__(self, source_code: str, filename: str, module_path: str = ""):
         self.source_code = source_code
         self.filename = filename
         self.module_path = module_path
         self.flow_name: str | None = None
+        self.is_async: bool = False  # Whether flow function is async def
         self.instances: dict[str, str] = {}  # Map instance variable to class name
         self.class_methods: set[str] = set()  # Track class method handlers
         self._loop_depth: int = 0  # Track nesting depth for break/continue validation
@@ -43,6 +69,16 @@ class FlowParser:
             raise FlowCompileError("No flow function found (signature: def name(p: dict) -> dict)")
 
         self.flow_name = flow_func.name
+        self.is_async = isinstance(flow_func, ast.AsyncFunctionDef)
+
+        # Normalize parameter name to "p" so generated code is consistent
+        param_name = flow_func.args.args[0].arg
+        if param_name != "p":
+            normalizer = _ParamNormalizer(param_name)
+            for i, stmt in enumerate(flow_func.body):
+                flow_func.body[i] = normalizer.visit(stmt)
+            ast.fix_missing_locations(flow_func)
+
         operations = self._parse_body(flow_func.body)
         return self.flow_name, operations
 
@@ -50,17 +86,17 @@ class FlowParser:
         """Return set of handler names that are class methods."""
         return self.class_methods.copy()
 
-    def _find_flow_function(self, tree: ast.Module) -> ast.FunctionDef | None:
+    def _find_flow_function(self, tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
         for node in tree.body:
-            if isinstance(node, ast.FunctionDef) and self._is_flow_function(node):
+            if isinstance(node, _FUNC_DEF_TYPES) and self._is_flow_function(node):
                 return node
         return None
 
-    def _is_flow_function(self, func: ast.FunctionDef) -> bool:
+    def _is_flow_function(self, func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         if len(func.args.args) != 1:
             return False
         arg = func.args.args[0]
-        if arg.arg not in ("p", "payload"):
+        if arg.arg not in VALID_PARAM_NAMES:
             return False
         return bool(func.returns)
 
@@ -100,6 +136,8 @@ class FlowParser:
             return [Continue(lineno=stmt.lineno)]
         elif isinstance(stmt, ast.Raise):
             return self._parse_raise(stmt)
+        elif isinstance(stmt, ast.Expr):
+            return self._parse_expr(stmt)
         else:
             raise FlowCompileError(f"{self.filename}:{stmt.lineno}: Unsupported statement type: {type(stmt).__name__}")
 
@@ -110,8 +148,11 @@ class FlowParser:
         target = stmt.targets[0]
 
         if isinstance(target, ast.Name) and target.id in ("p", "payload"):
-            # Assignment to p: must be actor call
-            if isinstance(stmt.value, ast.Call):
+            # Assignment to p: must be actor call (possibly wrapped in await)
+            value = stmt.value
+            if isinstance(value, ast.Await):
+                value = value.value
+            if isinstance(value, ast.Call):
                 return [self._parse_actor_call(stmt)]
             else:
                 raise FlowCompileError(f"{self.filename}:{stmt.lineno}: Invalid assignment to 'p'")
@@ -159,6 +200,9 @@ class FlowParser:
 
     def _parse_actor_call(self, stmt: ast.Assign) -> ActorCall:
         call = stmt.value
+        # Unwrap await: `p = await handler(p)` → extract the Call
+        if isinstance(call, ast.Await):
+            call = call.value
         if not isinstance(call, ast.Call):
             raise FlowCompileError(f"{self.filename}:{stmt.lineno}: Expected function call")
 
@@ -279,6 +323,23 @@ class FlowParser:
                 f"{self.filename}:{stmt.lineno}: 'raise' with arguments is not supported (use bare 'raise' to re-raise)"
             )
         return [Raise(lineno=stmt.lineno)]
+
+    def _parse_expr(self, stmt: ast.Expr) -> list[IROperation]:
+        """Handle bare expression statements with descriptive errors."""
+        value = stmt.value
+        if isinstance(value, ast.Yield | ast.YieldFrom):
+            raise FlowCompileError(f"{self.filename}:{stmt.lineno}: 'yield' is not supported in flow definitions")
+        if isinstance(value, ast.Await):
+            raise FlowCompileError(
+                f"{self.filename}:{stmt.lineno}: standalone 'await' is not supported; "
+                f"assign the result to 'p' (e.g. p = await handler(p))"
+            )
+        if isinstance(value, ast.Call):
+            raise FlowCompileError(
+                f"{self.filename}:{stmt.lineno}: standalone function call is not supported; "
+                f"assign the result to 'p' (e.g. p = handler(p))"
+            )
+        raise FlowCompileError(f"{self.filename}:{stmt.lineno}: expression statements are not supported")
 
     def _validate_class_instantiation(self, stmt: ast.Assign) -> None:
         """Validate that class instantiation uses only default arguments."""
