@@ -1,5 +1,24 @@
 {
-  "enabledPlugins": {
-    "beads@beads-marketplace": true
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "git aint status --compact",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "git aint status",
+            "type": "command"
+          }
+        ]
+      }
+    ]
   }
 }
