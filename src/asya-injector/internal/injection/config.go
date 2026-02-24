@@ -19,6 +19,16 @@ type ResiliencyConfig struct {
 	ActorTimeout       string
 }
 
+// StateProxyMount holds a single state proxy mount configuration
+type StateProxyMount struct {
+	Name           string
+	MountPath      string
+	ConnectorImage string
+	ConnectorEnv   []corev1.EnvVar
+	Resources      *corev1.ResourceRequirements
+	WriteMode      string
+}
+
 // ActorConfig holds the configuration extracted from an AsyncActor resource
 type ActorConfig struct {
 	// ActorName is the name of the actor
@@ -53,4 +63,7 @@ type ActorConfig struct {
 
 	// Resiliency is the resiliency configuration (nil means no resiliency config)
 	Resiliency *ResiliencyConfig
+
+	// StateProxy is the list of state proxy mount configurations
+	StateProxy []StateProxyMount
 }
