@@ -615,6 +615,20 @@ git checkout Chart.yaml  # Revert before committing
 
 **Rationale**: The `file://` pattern is only for E2E tests and local development. Published charts must reference the remote repository so users can install them without the source code.
 
+### Worktree Isolation Policy
+
+**All feature implementation MUST be done by agents in a git worktree.** Agents must never implement features directly on the main branch.
+
+**Required workflow**:
+1. Pick up an aint: `git aint pickup <ref>` — creates a worktree in `.worktrees/` and a feature branch
+2. Work exclusively inside the worktree at `.worktrees/<epic>/<task>.<slug>`
+3. Commit, push, and create a PR from the worktree branch
+4. Never merge directly — use PR workflow
+
+**Worktree location**: `.worktrees/` (gitignored from main branch). Structure: `.worktrees/<epic>/<task>.<slug>`.
+
+**Rationale**: Worktree isolation prevents accidental commits to main, enables parallel agent work on independent tasks, and ensures every feature goes through code review via PR.
+
 ### Command Execution Hierarchy
 1. **Prefer**: `make <target>` (e.g., `make test`, `make build`)
 2. **Last resort**: Direct commands only if no Makefile target exists
