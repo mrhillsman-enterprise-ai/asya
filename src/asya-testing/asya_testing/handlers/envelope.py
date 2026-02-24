@@ -120,3 +120,19 @@ def invalid_route_current_handler(message: dict[str, Any]) -> dict[str, Any]:
     output_route["next"] = []
 
     return {"payload": payload, "route": output_route, "headers": message.get("headers", {})}
+
+
+def fail_once_envelope_handler(message: dict[str, Any]) -> dict[str, Any]:
+    """Envelope-mode handler: fails on attempt 1, succeeds on attempt 2+.
+
+    Reads status.attempt to determine whether to fail, enabling retry integration
+    tests where the sidecar retries the same message with incremented attempt count.
+    """
+    attempt = (message.get("status") or {}).get("attempt", 1)
+    if attempt <= 1:
+        raise ValueError("Intentional first-attempt failure (attempt 1)")
+    return {
+        "payload": {**message["payload"], "succeeded_on_attempt": attempt},
+        "route": message["route"],
+        "headers": message.get("headers", {}),
+    }
