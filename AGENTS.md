@@ -635,6 +635,41 @@ git checkout Chart.yaml  # Revert before committing
 
 **Rule**: Add new Makefile targets instead of repeating raw commands. See `.claude/settings.local.json` for automation config.
 
+### Cheap Subagents for Lint and Test Fixes
+
+**Use Sonnet subagents (`model: "haiku"`) for fixing lint errors and unit test failures.** These are mechanical fixes that don't require expensive reasoning.
+
+**When to use**: After running `make lint` or `make test-unit` and getting failures, spawn subagents on Haiku or Sonnet to fix them instead of fixing inline on Opus.
+
+**Pattern**:
+1. Run `make lint` or `make test-unit` on Opus — capture the error output
+2. Spawn a `Task` subagent with `model: "haiku"` and `subagent_type: "Bash"` or `subagent_type: "general-purpose"`
+3. Pass the error output and file paths in the prompt
+4. Let the subagent fix the errors and verify with a re-run
+
+**Example prompt for subagent**:
+```
+Fix the following lint errors in the given files. After fixing, run `make lint`
+to verify all errors are resolved.
+
+Errors:
+<paste error output>
+```
+
+**What Sonnet handles well**:
+- Formatting fixes (ruff, gofmt, yamlfmt, prettier)
+- Import ordering and unused imports
+- Type annotation issues (mypy)
+- Simple test assertion fixes
+- Missing docstrings or comment adjustments
+
+**What stays on Opus**:
+- Diagnosing *why* a test fails (root cause analysis)
+- Architectural decisions about how to restructure code
+- Complex refactoring that caused the errors
+
+**Rationale**: Sonnet is significantly cheaper than Opus but perfectly capable of mechanical fixes. Reserve Opus context for design decisions and complex reasoning.
+
 ### Documentation Policy
 
 **NEVER proactively create documentation files** (*.md, README.md, design docs) unless explicitly requested by the user.
