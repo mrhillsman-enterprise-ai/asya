@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Tests for asya_runtime.py HTTP-over-Unix-socket server."""
 
+import http.client as http_client
 import importlib
 import json
 import os
+import socket
 import stat
 import sys
 import tempfile
 import textwrap
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -18,6 +21,18 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import asya_runtime
+
+
+class _UnixHTTPConnection(http_client.HTTPConnection):
+    """HTTP connection over Unix socket for testing."""
+
+    def __init__(self, socket_path):
+        super().__init__("localhost")
+        self._socket_path = socket_path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(self._socket_path)
 
 
 @pytest.fixture
@@ -86,6 +101,53 @@ def call_invoke(message: dict, user_func) -> list[dict]:
 
     # 400 or 500: error response is a single frame
     return [parsed]
+
+
+@pytest.fixture
+def runtime_invoke(tmp_path):
+    """Invoke a handler via HTTP runtime server and return (frames_or_error, status_code).
+
+    Returns:
+        For 200: (list[dict], 200) -- list of response frames
+        For 204: ([], 204) -- abort (handler returned None)
+        For 4xx/5xx: (dict, status) -- error response body
+    """
+    call_count = [0]
+
+    def _invoke(user_func, message):
+        call_count[0] += 1
+        socket_path = str(tmp_path / f"rt-{call_count[0]}.sock")
+        server = asya_runtime._UnixHTTPServer(socket_path, asya_runtime._InvokeHandler)
+        server.user_func = user_func
+
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+
+        conn = _UnixHTTPConnection(socket_path)
+        body = json.dumps(message).encode("utf-8")
+        conn.request(
+            "POST",
+            "/invoke",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        resp = conn.getresponse()
+        status = resp.status
+        raw = resp.read()
+        conn.close()
+        thread.join(timeout=5)
+        server.server_close()
+
+        if status == 204:
+            return [], status
+        if not raw:
+            return {}, status
+        data = json.loads(raw)
+        if status == 200:
+            return data["frames"], status
+        return data, status
+
+    return _invoke
 
 
 class TestHandlerReturnTypeValidation:
@@ -2399,3 +2461,236 @@ class TestAsyncHandlers:
 
         assert len(responses) == 1
         assert responses[0]["headers"] == {"trace_id": "abc", "priority": "high"}
+
+
+class TestHTTPServer:
+    """Test HTTP server infrastructure."""
+
+    def test_server_binds_to_unix_socket(self, tmp_path):
+        socket_path = str(tmp_path / "test.sock")
+        server = asya_runtime._UnixHTTPServer(socket_path, asya_runtime._InvokeHandler)
+        assert os.path.exists(socket_path)
+        server.server_close()
+        assert not os.path.exists(socket_path)
+
+    def test_server_removes_existing_socket(self, tmp_path):
+        socket_path = str(tmp_path / "test.sock")
+        Path(socket_path).touch()
+        server = asya_runtime._UnixHTTPServer(socket_path, asya_runtime._InvokeHandler)
+        assert os.path.exists(socket_path)
+        server.server_close()
+
+    def test_server_chmod(self, tmp_path, mock_env):
+        with mock_env(ASYA_SOCKET_CHMOD="0o600"):
+            socket_path = str(tmp_path / "chmod.sock")
+            server = asya_runtime._UnixHTTPServer(socket_path, asya_runtime._InvokeHandler)
+            mode = os.stat(socket_path).st_mode & 0o777
+            assert mode == 0o600
+            server.server_close()
+
+
+class TestHTTPInvoke:
+    """Test POST /invoke endpoint via HTTP."""
+
+    # --- Success (200) ---
+
+    def test_payload_mode_success(self, runtime_invoke):
+        def handler(payload):
+            return {"result": payload["x"] + 1}
+
+        message = {
+            "payload": {"x": 10},
+            "route": {"prev": [], "curr": "a", "next": ["b"]},
+        }
+        frames, status = runtime_invoke(handler, message)
+        assert status == 200
+        assert len(frames) == 1
+        assert frames[0]["payload"] == {"result": 11}
+        assert frames[0]["route"]["curr"] == "b"
+        assert frames[0]["route"]["prev"] == ["a"]
+
+    def test_payload_mode_preserves_headers(self, runtime_invoke):
+        message = {
+            "payload": {"x": 1},
+            "route": {"prev": [], "curr": "a", "next": ["b"]},
+            "headers": {"trace_id": "abc-123"},
+        }
+        frames, status = runtime_invoke(lambda p: {"ok": True}, message)
+        assert status == 200
+        assert frames[0]["headers"] == {"trace_id": "abc-123"}
+
+    def test_payload_mode_preserves_status(self, runtime_invoke):
+        message = {
+            "payload": {},
+            "route": {"prev": [], "curr": "a", "next": []},
+            "status": {"phase": "working"},
+        }
+        frames, status = runtime_invoke(lambda p: {"ok": True}, message)
+        assert status == 200
+        assert frames[0]["status"] == {"phase": "working"}
+
+    def test_async_handler(self, runtime_invoke):
+        async def handler(payload):
+            return {"async": True}
+
+        message = {"payload": {}, "route": {"prev": [], "curr": "a", "next": []}}
+        frames, status = runtime_invoke(handler, message)
+        assert status == 200
+        assert frames[0]["payload"] == {"async": True}
+
+    # --- Abort (204) ---
+
+    def test_handler_returns_none_204(self, runtime_invoke):
+        message = {"payload": {}, "route": {"prev": [], "curr": "a", "next": []}}
+        frames, status = runtime_invoke(lambda p: None, message)
+        assert status == 204
+        assert frames == []
+
+    # --- Handler error (500) ---
+
+    def test_handler_exception_500(self, runtime_invoke):
+        def bad_handler(payload):
+            raise ValueError("something broke")
+
+        message = {"payload": {}, "route": {"prev": [], "curr": "a", "next": []}}
+        error, status = runtime_invoke(bad_handler, message)
+        assert status == 500
+        assert error["error"] == "processing_error"
+        assert "something broke" in error["details"]["message"]
+        assert error["details"]["type"] == "ValueError"
+
+    # --- Parse error (400) ---
+
+    def test_missing_payload_400(self, runtime_invoke):
+        message = {"route": {"prev": [], "curr": "a", "next": []}}
+        error, status = runtime_invoke(lambda p: p, message)
+        assert status == 400
+        assert error["error"] == "msg_parsing_error"
+
+    def test_missing_route_400(self, runtime_invoke):
+        message = {"payload": {"x": 1}}
+        error, status = runtime_invoke(lambda p: p, message)
+        assert status == 400
+        assert error["error"] == "msg_parsing_error"
+
+    # --- Generators (collected into frames array) ---
+
+    def test_generator_fanout(self, runtime_invoke):
+        def gen(payload):
+            yield {"id": 1}
+            yield {"id": 2}
+            yield {"id": 3}
+
+        message = {"payload": {}, "route": {"prev": [], "curr": "a", "next": ["b"]}}
+        frames, status = runtime_invoke(gen, message)
+        assert status == 200
+        assert len(frames) == 3
+        assert [f["payload"]["id"] for f in frames] == [1, 2, 3]
+        assert all(f["route"]["curr"] == "b" for f in frames)
+
+    def test_generator_yields_nothing_204(self, runtime_invoke):
+        # A proper generator that immediately returns without yielding any values
+        def empty_gen(payload):
+            yield from []
+
+        message = {"payload": {}, "route": {"prev": [], "curr": "a", "next": []}}
+        frames, status = runtime_invoke(empty_gen, message)
+        assert status == 204
+
+    # --- Envelope mode ---
+
+    def test_envelope_mode_success(self, runtime_invoke, mock_env):
+        with mock_env(ASYA_HANDLER_MODE="envelope"):
+
+            def handler(msg):
+                return {
+                    "payload": {"processed": True},
+                    "route": msg["route"],
+                }
+
+            message = {"payload": {"x": 1}, "route": {"prev": [], "curr": "a", "next": []}}
+            frames, status = runtime_invoke(handler, message)
+            assert status == 200
+            assert frames[0]["payload"] == {"processed": True}
+
+    def test_envelope_mode_returns_none(self, runtime_invoke, mock_env):
+        with mock_env(ASYA_HANDLER_MODE="envelope"):
+            message = {"payload": {}, "route": {"prev": [], "curr": "a", "next": []}}
+            frames, status = runtime_invoke(lambda m: None, message)
+            assert status == 204
+
+    def test_envelope_mode_generator(self, runtime_invoke, mock_env):
+        with mock_env(ASYA_HANDLER_MODE="envelope"):
+
+            def gen(msg):
+                for i in range(2):
+                    yield {
+                        "payload": {"i": i},
+                        "route": msg["route"],
+                    }
+
+            message = {"payload": {}, "route": {"prev": [], "curr": "a", "next": []}}
+            frames, status = runtime_invoke(gen, message)
+            assert status == 200
+            assert len(frames) == 2
+
+    # --- Large payloads ---
+
+    @pytest.mark.parametrize("size_kb", [10, 100, 500, 1024])
+    def test_large_payloads(self, runtime_invoke, size_kb):
+        large_data = "X" * (size_kb * 1024)
+        message = {
+            "payload": {"data": large_data},
+            "route": {"prev": [], "curr": "a", "next": []},
+        }
+        frames, status = runtime_invoke(lambda p: p, message)
+        assert status == 200
+        assert len(frames[0]["payload"]["data"]) == size_kb * 1024
+
+    # --- 404 ---
+
+    def test_wrong_path_404(self, tmp_path):
+        socket_path = str(tmp_path / "test.sock")
+        server = asya_runtime._UnixHTTPServer(socket_path, asya_runtime._InvokeHandler)
+        server.user_func = lambda p: p
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+
+        conn = _UnixHTTPConnection(socket_path)
+        conn.request("POST", "/health")
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        thread.join(timeout=5)
+        server.server_close()
+        assert resp.status == 404
+
+
+class TestHTTPHealthz:
+    """Test GET /healthz endpoint."""
+
+    def _make_get_request(self, tmp_path, path):
+        socket_path = str(tmp_path / "healthz.sock")
+        server = asya_runtime._UnixHTTPServer(socket_path, asya_runtime._InvokeHandler)
+        server.user_func = lambda p: p
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+
+        conn = _UnixHTTPConnection(socket_path)
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        raw = resp.read()
+        conn.close()
+        thread.join(timeout=5)
+        server.server_close()
+        return resp.status, raw
+
+    def test_healthz_returns_200_with_ready_status(self, tmp_path):
+        status, raw = self._make_get_request(tmp_path, "/healthz")
+        assert status == 200
+        data = json.loads(raw)
+        assert data == {"status": "ready"}
+
+    def test_healthz_unknown_path_returns_404(self, tmp_path):
+        status, _ = self._make_get_request(tmp_path, "/unknown")
+        assert status == 404
