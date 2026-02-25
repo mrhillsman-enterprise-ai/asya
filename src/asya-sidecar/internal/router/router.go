@@ -102,6 +102,27 @@ func (r *Router) maxAttempts() int {
 	return 1
 }
 
+// effectiveTimeout computes the per-message timeout as the minimum of:
+//   - ASYA_RUNTIME_TIMEOUT (global fallback, r.cfg.Timeout)
+//   - ASYA_RESILIENCY_ACTOR_TIMEOUT (per-actor, from XRD)
+//   - remaining SLA (deadline_at - now, from message status)
+func (r *Router) effectiveTimeout(msg *messages.Message) time.Duration {
+	timeout := r.cfg.Timeout
+
+	if r.cfg.Resiliency != nil && r.cfg.Resiliency.ActorTimeout > 0 && r.cfg.Resiliency.ActorTimeout < timeout {
+		timeout = r.cfg.Resiliency.ActorTimeout
+	}
+
+	if deadline, ok := msg.ParseDeadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+
+	return timeout
+}
+
 // shouldReportFinalToGateway returns false for messages that must NOT trigger
 // a final-status report to the gateway:
 //  1. x-asya-fan-in header: fan-in partial batch (actor handles aggregation, not gateway)
@@ -146,7 +167,7 @@ func (r *Router) processEndActorMessage(ctx context.Context, msg messages.Messag
 
 	// Send to runtime without route validation (end actors don't forward upstream events)
 	runtimeStart := time.Now()
-	responses, err := r.runtimeClient.CallRuntime(ctx, msgBody, r.cfg.Timeout, nil)
+	responses, err := r.runtimeClient.CallRuntime(ctx, msgBody, r.effectiveTimeout(&msg), nil)
 	runtimeDuration := time.Since(runtimeStart)
 
 	if r.metrics != nil {
@@ -653,6 +674,45 @@ func (r *Router) ProcessMessage(ctx context.Context, queueMsg transport.QueueMes
 		return nil
 	}
 
+	// SLA pre-check: reject expired messages before processing
+	if deadline, ok := msg.ParseDeadline(); ok && time.Now().After(deadline) {
+		slog.Warn("Message SLA expired, routing to x-sink",
+			"id", msg.ID, "deadline_at", msg.Status.DeadlineAt,
+			"expired_by", time.Since(deadline))
+
+		if r.metrics != nil {
+			r.metrics.RecordMessageProcessed(r.actorName, "sla_expired")
+			r.metrics.RecordMessageFailed(r.actorName, "sla_timeout")
+			r.metrics.RecordProcessingDuration(r.actorName, time.Since(startTime))
+		}
+
+		// Report timeout to gateway
+		if r.progressReporter != nil {
+			reportCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			defer cancel()
+			_ = r.progressReporter.ReportFinalError(reportCtx, msg.ID, "SLA deadline expired")
+		}
+
+		// Stamp failed/Timeout status and route to x-sink
+		now := time.Now().UTC().Format(time.RFC3339)
+		createdAt := now
+		if msg.Status != nil {
+			createdAt = msg.Status.CreatedAt
+		}
+		msg.Status = &messages.Status{
+			Phase:       messages.PhaseFailed,
+			Reason:      messages.ReasonTimeout,
+			Actor:       r.actorName,
+			Attempt:     1,
+			MaxAttempts: 1,
+			CreatedAt:   createdAt,
+			DeadlineAt:  msg.Status.DeadlineAt,
+			UpdatedAt:   now,
+		}
+
+		return r.sendToSinkQueue(ctx, *msg)
+	}
+
 	if r.cfg.IsEndActor {
 		return r.processEndActorMessage(ctx, *msg, queueMsg.Body, startTime)
 	}
@@ -721,7 +781,7 @@ func (r *Router) ProcessMessage(ctx context.Context, queueMsg transport.QueueMes
 
 	slog.Info("Calling runtime", "id", msg.ID, "actor", r.cfg.ActorName)
 	runtimeStart := time.Now()
-	responses, err := r.runtimeClient.CallRuntime(ctx, updatedBody, r.cfg.Timeout, onUpstream)
+	responses, err := r.runtimeClient.CallRuntime(ctx, updatedBody, r.effectiveTimeout(msg), onUpstream)
 	runtimeDuration := time.Since(runtimeStart)
 
 	if err != nil {
@@ -903,21 +963,25 @@ func (r *Router) routeResponse(ctx context.Context, id string, parentID *string,
 	return err
 }
 
-// sendToSinkQueue sends the original message to the x-sink queue
+// sendToSinkQueue sends the original message to the x-sink queue.
+// If message.Status already has a terminal phase (succeeded/failed),
+// it is preserved. Otherwise, PhaseSucceeded/ReasonCompleted is stamped.
 func (r *Router) sendToSinkQueue(ctx context.Context, message messages.Message) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	createdAt := now
-	if message.Status != nil {
-		createdAt = message.Status.CreatedAt
-	}
-	message.Status = &messages.Status{
-		Phase:       messages.PhaseSucceeded,
-		Reason:      messages.ReasonCompleted,
-		Actor:       r.actorName,
-		Attempt:     1,
-		MaxAttempts: 1,
-		CreatedAt:   createdAt,
-		UpdatedAt:   now,
+	if message.Status == nil || (message.Status.Phase != messages.PhaseSucceeded && message.Status.Phase != messages.PhaseFailed) {
+		now := time.Now().UTC().Format(time.RFC3339)
+		createdAt := now
+		if message.Status != nil {
+			createdAt = message.Status.CreatedAt
+		}
+		message.Status = &messages.Status{
+			Phase:       messages.PhaseSucceeded,
+			Reason:      messages.ReasonCompleted,
+			Actor:       r.actorName,
+			Attempt:     1,
+			MaxAttempts: 1,
+			CreatedAt:   createdAt,
+			UpdatedAt:   now,
+		}
 	}
 
 	msgBody, err := json.Marshal(message)
