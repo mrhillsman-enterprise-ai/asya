@@ -3,4 +3,4 @@ WORKDIR /app
 COPY pyproject.toml .
 COPY asya_state_proxy/ asya_state_proxy/
 RUN pip install --no-cache-dir ".[s3]"
-ENTRYPOINT ["python", "-m", "asya_state_proxy.connectors.s3_buffered_lww"]
+ENTRYPOINT ["python", "-m", "asya_state_proxy.connectors.s3_buffered_cas"]

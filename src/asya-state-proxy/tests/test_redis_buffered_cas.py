@@ -1,44 +1,28 @@
-"""Tests for S3BufferedLWW connector using moto mock_aws."""
+"""Tests for RedisBufferedCAS connector using fakeredis."""
 
 import io
 
-import boto3
+import fakeredis
 import pytest
-from asya_state_proxy.connectors.s3_buffered_lww.connector import S3BufferedLWW
+import redis as redis_lib
+from asya_state_proxy.connectors.redis_buffered_cas.connector import RedisBufferedCAS
 from asya_state_proxy.interface import KeyMeta
-from moto import mock_aws
-
-
-TEST_BUCKET = "test-state-bucket"
-TEST_REGION = "us-east-1"
 
 
 @pytest.fixture(autouse=True)
-def aws_env(monkeypatch):
-    """Set required environment variables for S3BufferedLWW."""
-    monkeypatch.setenv("STATE_BUCKET", TEST_BUCKET)
-    monkeypatch.setenv("AWS_REGION", TEST_REGION)
+def redis_env(monkeypatch):
+    """Set required environment variables for RedisBufferedCAS."""
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.delenv("STATE_PREFIX", raising=False)
-    monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
-    # moto requires fake credentials
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
-    monkeypatch.setenv("AWS_SECURITY_TOKEN", "testing")
-    monkeypatch.setenv("AWS_SESSION_TOKEN", "testing")
 
 
 @pytest.fixture()
-def s3_bucket():
-    """Create a mock S3 bucket and yield."""
-    with mock_aws():
-        client = boto3.client("s3", region_name=TEST_REGION)
-        client.create_bucket(Bucket=TEST_BUCKET)
-        yield client
-
-
-@pytest.fixture()
-def connector(s3_bucket):
-    return S3BufferedLWW()
+def connector(monkeypatch):
+    """Create a RedisBufferedCAS with fakeredis backend."""
+    conn = RedisBufferedCAS()
+    fake = fakeredis.FakeRedis()
+    conn._redis = fake
+    return conn
 
 
 # ---------------------------------------------------------------------------
@@ -125,21 +109,41 @@ def test_delete_missing_key_raises_file_not_found(connector):
         connector.delete("nope")
 
 
-def test_write_overwrites_existing_key_lww(connector):
+def test_write_overwrites_existing_key(connector):
     connector.write("k", io.BytesIO(b"first"))
     connector.write("k", io.BytesIO(b"second"))
     assert connector.read("k").read() == b"second"
 
 
-def test_state_prefix_is_applied(monkeypatch, s3_bucket):
+def test_cas_conflict_raises_file_exists_error(connector):
+    connector.write("k", io.BytesIO(b"v1"))
+
+    original_pipeline = connector._redis.pipeline
+
+    def mock_pipeline(*args, **kwargs):
+        pipe = original_pipeline(*args, **kwargs)
+
+        def mock_execute(*a, **kw):
+            raise redis_lib.WatchError("Watched variable changed")
+
+        pipe.execute = mock_execute
+        return pipe
+
+    connector._redis.pipeline = mock_pipeline
+    with pytest.raises(FileExistsError, match="CAS conflict"):
+        connector.write("k", io.BytesIO(b"v2"))
+
+
+def test_state_prefix_is_applied(monkeypatch):
     monkeypatch.setenv("STATE_PREFIX", "my-prefix")
-    conn = S3BufferedLWW()
+    conn = RedisBufferedCAS()
+    fake = fakeredis.FakeRedis()
+    conn._redis = fake
+
     conn.write("foo", io.BytesIO(b"bar"))
 
-    # Verify the full S3 key includes the prefix
-    response = s3_bucket.list_objects_v2(Bucket=TEST_BUCKET, Prefix="my-prefix/")
-    keys = [obj["Key"] for obj in response.get("Contents", [])]
-    assert "my-prefix/foo" in keys
+    # Verify the full Redis key includes the prefix
+    assert fake.exists("my-prefix:foo")
 
     # Read back via connector strips the prefix
     assert conn.read("foo").read() == b"bar"

@@ -1,11 +1,12 @@
-"""Tests for S3BufferedLWW connector using moto mock_aws."""
+"""Tests for S3BufferedCAS connector using moto mock_aws."""
 
 import io
 
 import boto3
 import pytest
-from asya_state_proxy.connectors.s3_buffered_lww.connector import S3BufferedLWW
+from asya_state_proxy.connectors.s3_buffered_cas.connector import S3BufferedCAS
 from asya_state_proxy.interface import KeyMeta
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 
@@ -15,7 +16,7 @@ TEST_REGION = "us-east-1"
 
 @pytest.fixture(autouse=True)
 def aws_env(monkeypatch):
-    """Set required environment variables for S3BufferedLWW."""
+    """Set required environment variables for S3BufferedCAS."""
     monkeypatch.setenv("STATE_BUCKET", TEST_BUCKET)
     monkeypatch.setenv("AWS_REGION", TEST_REGION)
     monkeypatch.delenv("STATE_PREFIX", raising=False)
@@ -38,11 +39,11 @@ def s3_bucket():
 
 @pytest.fixture()
 def connector(s3_bucket):
-    return S3BufferedLWW()
+    return S3BufferedCAS()
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Basic read/write roundtrip tests (same as LWW)
 # ---------------------------------------------------------------------------
 
 
@@ -125,15 +126,9 @@ def test_delete_missing_key_raises_file_not_found(connector):
         connector.delete("nope")
 
 
-def test_write_overwrites_existing_key_lww(connector):
-    connector.write("k", io.BytesIO(b"first"))
-    connector.write("k", io.BytesIO(b"second"))
-    assert connector.read("k").read() == b"second"
-
-
 def test_state_prefix_is_applied(monkeypatch, s3_bucket):
     monkeypatch.setenv("STATE_PREFIX", "my-prefix")
-    conn = S3BufferedLWW()
+    conn = S3BufferedCAS()
     conn.write("foo", io.BytesIO(b"bar"))
 
     # Verify the full S3 key includes the prefix
@@ -143,3 +138,93 @@ def test_state_prefix_is_applied(monkeypatch, s3_bucket):
 
     # Read back via connector strips the prefix
     assert conn.read("foo").read() == b"bar"
+
+
+# ---------------------------------------------------------------------------
+# CAS-specific tests
+# ---------------------------------------------------------------------------
+
+
+def test_write_new_key_without_read_succeeds(connector):
+    """Writing a brand-new key (no prior read) should succeed unconditionally."""
+    connector.write("brand-new", io.BytesIO(b"first-value"))
+    assert connector.read("brand-new").read() == b"first-value"
+
+
+def test_write_after_read_with_no_intervening_change_succeeds(connector):
+    """Read a key then write it back; ETags match so write succeeds."""
+    connector.write("k", io.BytesIO(b"original"))
+    connector.read("k")  # caches ETag
+    connector.write("k", io.BytesIO(b"updated"))
+    assert connector.read("k").read() == b"updated"
+
+
+def test_write_after_external_change_raises_conflict(connector, s3_bucket):
+    """Read a key, externally modify the S3 object, then write raises FileExistsError."""
+    connector.write("k", io.BytesIO(b"v1"))
+    connector.read("k")  # caches ETag
+
+    # Patch put_object to simulate a 412 PreconditionFailed response when
+    # IfMatch is present, as moto does not enforce conditional writes.
+    original_put = connector._s3.put_object
+
+    def mock_put(**kwargs):
+        if "IfMatch" in kwargs:
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "PreconditionFailed",
+                        "Message": "At least one of the pre-conditions you specified did not hold",
+                    }
+                },
+                "PutObject",
+            )
+        return original_put(**kwargs)
+
+    connector._s3.put_object = mock_put
+    with pytest.raises(FileExistsError, match="CAS conflict"):
+        connector.write("k", io.BytesIO(b"v2"))
+
+
+def test_write_twice_without_read_succeeds(connector):
+    """Write twice without reading; second write uses ETag from first write response."""
+    connector.write("k", io.BytesIO(b"first"))
+    connector.write("k", io.BytesIO(b"second"))
+    assert connector.read("k").read() == b"second"
+
+
+def test_delete_clears_etag_cache(connector):
+    """After read + delete, a subsequent write should succeed as a new key."""
+    connector.write("k", io.BytesIO(b"v1"))
+    connector.read("k")  # caches ETag
+    connector.delete("k")  # clears ETag cache
+
+    # Write after delete should succeed as an unconditional (new key) write.
+    connector.write("k", io.BytesIO(b"v2"))
+    assert connector.read("k").read() == b"v2"
+
+
+def test_cas_conflict_on_stale_etag(connector, s3_bucket):
+    """Simulate CAS conflict when ETag is stale."""
+    connector.write("k", io.BytesIO(b"v1"))
+    connector.read("k")  # caches ETag
+
+    # Patch put_object to simulate a 412 PreconditionFailed response.
+    original_put = connector._s3.put_object
+
+    def mock_put(**kwargs):
+        if "IfMatch" in kwargs:
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "PreconditionFailed",
+                        "Message": "At least one of the pre-conditions you specified did not hold",
+                    }
+                },
+                "PutObject",
+            )
+        return original_put(**kwargs)
+
+    connector._s3.put_object = mock_put
+    with pytest.raises(FileExistsError, match="CAS conflict"):
+        connector.write("k", io.BytesIO(b"v2"))

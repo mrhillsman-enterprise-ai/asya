@@ -1,10 +1,10 @@
-"""Tests for S3BufferedLWW connector using moto mock_aws."""
+"""Tests for S3Passthrough connector using moto mock_aws."""
 
 import io
 
 import boto3
 import pytest
-from asya_state_proxy.connectors.s3_buffered_lww.connector import S3BufferedLWW
+from asya_state_proxy.connectors.s3_passthrough.connector import S3Passthrough, _StreamingBodyWrapper
 from asya_state_proxy.interface import KeyMeta
 from moto import mock_aws
 
@@ -15,7 +15,7 @@ TEST_REGION = "us-east-1"
 
 @pytest.fixture(autouse=True)
 def aws_env(monkeypatch):
-    """Set required environment variables for S3BufferedLWW."""
+    """Set required environment variables for S3Passthrough."""
     monkeypatch.setenv("STATE_BUCKET", TEST_BUCKET)
     monkeypatch.setenv("AWS_REGION", TEST_REGION)
     monkeypatch.delenv("STATE_PREFIX", raising=False)
@@ -38,7 +38,7 @@ def s3_bucket():
 
 @pytest.fixture()
 def connector(s3_bucket):
-    return S3BufferedLWW()
+    return S3Passthrough()
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +125,7 @@ def test_delete_missing_key_raises_file_not_found(connector):
         connector.delete("nope")
 
 
-def test_write_overwrites_existing_key_lww(connector):
+def test_write_overwrites_existing_key(connector):
     connector.write("k", io.BytesIO(b"first"))
     connector.write("k", io.BytesIO(b"second"))
     assert connector.read("k").read() == b"second"
@@ -133,7 +133,7 @@ def test_write_overwrites_existing_key_lww(connector):
 
 def test_state_prefix_is_applied(monkeypatch, s3_bucket):
     monkeypatch.setenv("STATE_PREFIX", "my-prefix")
-    conn = S3BufferedLWW()
+    conn = S3Passthrough()
     conn.write("foo", io.BytesIO(b"bar"))
 
     # Verify the full S3 key includes the prefix
@@ -143,3 +143,12 @@ def test_state_prefix_is_applied(monkeypatch, s3_bucket):
 
     # Read back via connector strips the prefix
     assert conn.read("foo").read() == b"bar"
+
+
+def test_read_streams_without_full_buffer(connector):
+    """Verify read() returns a streaming wrapper, not a BytesIO buffer."""
+    data = b"streaming content"
+    connector.write("stream-key", io.BytesIO(data))
+    result = connector.read("stream-key")
+    assert isinstance(result, _StreamingBodyWrapper)
+    assert result.read() == data
