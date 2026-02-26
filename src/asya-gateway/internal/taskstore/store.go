@@ -124,9 +124,19 @@ func (s *Store) Update(update types.TaskUpdate) error {
 		task.CurrentActorName = update.Actor
 	}
 
+	// Store pause metadata if present
+	if update.PauseMetadata != nil {
+		task.PauseMetadata = update.PauseMetadata
+	}
+
 	// Cancel timeout timer if task reaches final state
 	if s.isFinal(update.Status) {
 		s.cancelTimer(update.ID)
+	}
+
+	// Freeze timeout timer when task is paused: save remaining budget and cancel timer
+	if update.Status == types.TaskStatusPaused {
+		s.freezeTimer(task)
 	}
 
 	// Store update in history
@@ -167,6 +177,16 @@ func (s *Store) UpdateProgress(update types.TaskUpdate) error {
 
 	if update.Message != "" {
 		task.Message = update.Message
+	}
+
+	// Store pause metadata if present (HITL pause signal from sidecar)
+	if update.PauseMetadata != nil {
+		task.PauseMetadata = update.PauseMetadata
+	}
+
+	// Freeze timeout timer when task is paused: save remaining budget and cancel timer
+	if update.Status == types.TaskStatusPaused {
+		s.freezeTimer(task)
 	}
 
 	// Store update in history
@@ -259,6 +279,11 @@ func (s *Store) IsActive(id string) bool {
 		return false
 	}
 
+	// Paused tasks are not active (sidecar should not route further)
+	if task.Status == types.TaskStatusPaused {
+		return false
+	}
+
 	// Check if task has timed out
 	if !task.Deadline.IsZero() && time.Now().After(task.Deadline) {
 		return false
@@ -307,7 +332,75 @@ func (s *Store) cancelTimer(id string) {
 	}
 }
 
+// freezeTimer saves remaining timeout budget and cancels the timer (must hold lock)
+func (s *Store) freezeTimer(task *types.Task) {
+	if !task.Deadline.IsZero() {
+		remaining := time.Until(task.Deadline).Seconds()
+		if remaining < 0 {
+			remaining = 0
+		}
+		task.RemainingTimeoutSec = &remaining
+	}
+	s.cancelTimer(task.ID)
+}
+
+// Resume transitions a paused task back to running, restarting the timeout timer
+func (s *Store) Resume(id string) (*types.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	task, exists := s.tasks[id]
+	if !exists {
+		return nil, fmt.Errorf("task %s not found", id)
+	}
+
+	if task.Status != types.TaskStatusPaused {
+		return nil, fmt.Errorf("task %s is not paused (status: %s)", id, task.Status)
+	}
+
+	task.Status = types.TaskStatusRunning
+	task.UpdatedAt = time.Now()
+	task.PauseMetadata = nil
+
+	// Thaw: restart timeout timer with remaining budget
+	if task.RemainingTimeoutSec != nil && *task.RemainingTimeoutSec > 0 {
+		remaining := *task.RemainingTimeoutSec
+		task.Deadline = time.Now().Add(time.Duration(remaining * float64(time.Second)))
+		task.RemainingTimeoutSec = nil
+		s.timers[id] = time.AfterFunc(time.Duration(remaining*float64(time.Second)), func() {
+			s.handleTimeout(id)
+		})
+	}
+
+	// Notify listeners
+	update := types.TaskUpdate{
+		ID:        id,
+		Status:    types.TaskStatusRunning,
+		Message:   "Task resumed",
+		Timestamp: task.UpdatedAt,
+	}
+	s.updates[id] = append(s.updates[id], update)
+	s.notifyListeners(update)
+
+	return task, nil
+}
+
+// List returns all tasks, optionally filtered by status
+func (s *Store) List(status *types.TaskStatus) ([]*types.Task, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []*types.Task
+	for _, task := range s.tasks {
+		if status != nil && task.Status != *status {
+			continue
+		}
+		result = append(result, task)
+	}
+	return result, nil
+}
+
 // isFinal checks if a status is final (must hold lock)
 func (s *Store) isFinal(status types.TaskStatus) bool {
-	return status == types.TaskStatusSucceeded || status == types.TaskStatusFailed
+	return status == types.TaskStatusSucceeded || status == types.TaskStatusFailed || status == types.TaskStatusCanceled
 }

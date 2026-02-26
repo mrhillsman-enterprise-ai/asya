@@ -305,6 +305,12 @@ func (s *PgStore) Update(update types.TaskUpdate) error {
 		}
 	}
 
+	// Prepare pause_metadata for SQL
+	var pauseMetadata interface{}
+	if update.PauseMetadata != nil {
+		pauseMetadata = []byte(update.PauseMetadata)
+	}
+
 	updateQuery := `
 		UPDATE tasks
 		SET status = $1,
@@ -312,7 +318,8 @@ func (s *PgStore) Update(update types.TaskUpdate) error {
 		    error = COALESCE($3, error),
 		    message = COALESCE(NULLIF($4, ''), message),
 		    progress_percent = COALESCE($5, progress_percent),
-		    updated_at = $6
+		    updated_at = $6,
+		    pause_metadata = COALESCE($8, pause_metadata)
 		WHERE id = $7
 	`
 
@@ -324,6 +331,7 @@ func (s *PgStore) Update(update types.TaskUpdate) error {
 		update.ProgressPercent,
 		update.Timestamp,
 		update.ID,
+		pauseMetadata,
 	)
 
 	if err != nil {
@@ -382,6 +390,18 @@ func (s *PgStore) Update(update types.TaskUpdate) error {
 		s.mu.Unlock()
 	}
 
+	// Freeze timeout timer when task is paused: save remaining budget via SQL and cancel timer
+	if update.Status == types.TaskStatusPaused {
+		if _, err := s.pool.Exec(s.ctx,
+			`UPDATE tasks SET remaining_timeout_sec = EXTRACT(EPOCH FROM (deadline - NOW())) WHERE id = $1 AND deadline IS NOT NULL`,
+			update.ID); err != nil {
+			return fmt.Errorf("failed to save remaining timeout for paused task %s: %w", update.ID, err)
+		}
+		s.mu.Lock()
+		s.cancelTimer(update.ID)
+		s.mu.Unlock()
+	}
+
 	// Notify listeners
 	s.mu.RLock()
 	s.notifyListeners(update)
@@ -428,6 +448,12 @@ func (s *PgStore) UpdateProgress(update types.TaskUpdate) error {
 		routeNext = []string{}
 	}
 
+	// Prepare pause_metadata for SQL (nil → NULL, preserves existing value via COALESCE)
+	var pauseMetadata interface{}
+	if update.PauseMetadata != nil {
+		pauseMetadata = []byte(update.PauseMetadata)
+	}
+
 	updateQuery := `
 		UPDATE tasks
 		SET progress_percent  = COALESCE($1, progress_percent),
@@ -439,7 +465,8 @@ func (s *PgStore) UpdateProgress(update types.TaskUpdate) error {
 		    total_actors       = COALESCE($7, total_actors),
 		    actors_completed   = $8,
 		    status             = $9,
-		    updated_at         = $10
+		    updated_at         = $10,
+		    pause_metadata     = COALESCE($12, pause_metadata)
 		WHERE id = $11
 	`
 
@@ -455,6 +482,7 @@ func (s *PgStore) UpdateProgress(update types.TaskUpdate) error {
 		update.Status,
 		update.Timestamp,
 		update.ID,
+		pauseMetadata,
 	)
 
 	if err != nil {
@@ -498,10 +526,23 @@ func (s *PgStore) UpdateProgress(update types.TaskUpdate) error {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Notify SSE listeners
-	s.mu.RLock()
-	s.notifyListeners(update)
-	s.mu.RUnlock()
+	// Freeze timeout timer when task is paused: save remaining budget and cancel timer
+	if update.Status == types.TaskStatusPaused {
+		if _, err := s.pool.Exec(s.ctx,
+			`UPDATE tasks SET remaining_timeout_sec = EXTRACT(EPOCH FROM (deadline - NOW())) WHERE id = $1 AND deadline IS NOT NULL`,
+			update.ID); err != nil {
+			return fmt.Errorf("failed to save remaining timeout for paused task %s: %w", update.ID, err)
+		}
+		s.mu.Lock()
+		s.cancelTimer(update.ID)
+		s.notifyListeners(update)
+		s.mu.Unlock()
+	} else {
+		// Notify SSE listeners
+		s.mu.RLock()
+		s.notifyListeners(update)
+		s.mu.RUnlock()
+	}
 
 	return nil
 }
@@ -647,6 +688,11 @@ func (s *PgStore) IsActive(id string) bool {
 		return false
 	}
 
+	// Paused tasks are not active (sidecar should not route further)
+	if status == types.TaskStatusPaused {
+		return false
+	}
+
 	// Check if task has timed out
 	if deadline != nil && time.Now().After(*deadline) {
 		return false
@@ -699,9 +745,136 @@ func (s *PgStore) cancelTimer(id string) {
 	}
 }
 
+// Resume transitions a paused task back to running, restarting the timeout timer
+func (s *PgStore) Resume(id string) (*types.Task, error) {
+	// Thaw: restore remaining timeout and transition to running
+	result, err := s.pool.Exec(s.ctx, `
+		UPDATE tasks
+		SET status = $1,
+		    deadline = CASE WHEN remaining_timeout_sec IS NOT NULL
+		                    THEN NOW() + remaining_timeout_sec * INTERVAL '1 second'
+		                    ELSE deadline END,
+		    remaining_timeout_sec = NULL,
+		    pause_metadata = NULL,
+		    updated_at = NOW()
+		WHERE id = $2 AND status = 'paused'
+	`, types.TaskStatusRunning, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resume task: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		// Task either doesn't exist or is not paused
+		task, err := s.Get(id)
+		if err != nil {
+			return nil, fmt.Errorf("task %s not found", id)
+		}
+		return nil, fmt.Errorf("task %s is not paused (status: %s)", id, task.Status)
+	}
+
+	// Fetch updated task
+	task, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+
+	// Restart in-memory timeout timer with restored deadline
+	if !task.Deadline.IsZero() {
+		remaining := time.Until(task.Deadline)
+		if remaining > 0 {
+			s.mu.Lock()
+			s.timers[id] = time.AfterFunc(remaining, func() {
+				s.handleTimeout(id)
+			})
+			s.mu.Unlock()
+		}
+	}
+
+	// Notify listeners
+	update := types.TaskUpdate{
+		ID:        id,
+		Status:    types.TaskStatusRunning,
+		Message:   "Task resumed",
+		Timestamp: task.UpdatedAt,
+	}
+	s.mu.RLock()
+	s.notifyListeners(update)
+	s.mu.RUnlock()
+
+	return task, nil
+}
+
+// List returns tasks, optionally filtered by status
+func (s *PgStore) List(status *types.TaskStatus) ([]*types.Task, error) {
+	query := `
+		SELECT id, context_id, status, payload, result, error, timeout_seconds, deadline,
+		       remaining_timeout_sec, progress_percent, current_actor_name, message,
+		       pause_metadata, actors_completed, total_actors,
+		       route_prev, route_curr, route_next,
+		       created_at, updated_at
+		FROM tasks`
+	var args []any
+
+	if status != nil {
+		query += " WHERE status = $1"
+		args = []any{*status}
+	}
+
+	query += " ORDER BY created_at DESC"
+
+	rows, err := s.pool.Query(s.ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []*types.Task
+	for rows.Next() {
+		var task types.Task
+		var payloadJSON, resultJSON, pauseMetadataJSON []byte
+		var remainingTimeout *float64
+
+		err := rows.Scan(
+			&task.ID, &task.ContextID, &task.Status,
+			&payloadJSON, &resultJSON, &task.Error,
+			&task.TimeoutSec, &task.Deadline,
+			&remainingTimeout,
+			&task.ProgressPercent, &task.CurrentActorName, &task.Message,
+			&pauseMetadataJSON,
+			&task.ActorsCompleted, &task.TotalActors,
+			&task.Route.Prev, &task.Route.Curr, &task.Route.Next,
+			&task.CreatedAt, &task.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan task: %w", err)
+		}
+
+		if payloadJSON != nil {
+			if err := json.Unmarshal(payloadJSON, &task.Payload); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal payload for task %s: %w", task.ID, err)
+			}
+		}
+		if resultJSON != nil {
+			if err := json.Unmarshal(resultJSON, &task.Result); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal result for task %s: %w", task.ID, err)
+			}
+		}
+		if pauseMetadataJSON != nil {
+			task.PauseMetadata = pauseMetadataJSON
+		}
+		if remainingTimeout != nil {
+			task.RemainingTimeoutSec = remainingTimeout
+		}
+
+		tasks = append(tasks, &task)
+	}
+
+	return tasks, nil
+}
+
 // isFinal checks if a status is final
 func (s *PgStore) isFinal(status types.TaskStatus) bool {
-	return status == types.TaskStatusSucceeded || status == types.TaskStatusFailed
+	return status == types.TaskStatusSucceeded || status == types.TaskStatusFailed || status == types.TaskStatusCanceled
 }
 
 // cleanupOldUpdates periodically removes old task updates (keep last 24 hours)
