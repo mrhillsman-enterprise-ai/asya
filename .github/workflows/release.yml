@@ -112,6 +112,7 @@ jobs:
         - asya-sdk
         - asya-workbench
         - asya-dashboard
+        - asya-webhook
         - function-asya-overlays
 
     steps:
