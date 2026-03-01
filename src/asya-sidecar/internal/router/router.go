@@ -713,20 +713,6 @@ func (r *Router) ProcessMessage(ctx context.Context, queueMsg transport.QueueMes
 			"id", msg.ID, "deadline_at", msg.Status.DeadlineAt,
 			"expired_by", time.Since(deadline))
 
-		if r.metrics != nil {
-			r.metrics.RecordMessageProcessed(r.actorName, "sla_expired")
-			r.metrics.RecordMessageFailed(r.actorName, "sla_timeout")
-			r.metrics.RecordProcessingDuration(r.actorName, time.Since(startTime))
-		}
-
-		// Report timeout to gateway
-		if r.progressReporter != nil {
-			reportCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-			defer cancel()
-			_ = r.progressReporter.ReportFinalError(reportCtx, msg.ID, "SLA deadline expired")
-		}
-
-		// Stamp failed/Timeout status and route to x-sink
 		now := time.Now().UTC().Format(time.RFC3339)
 		createdAt := now
 		if msg.Status != nil {
@@ -743,7 +729,7 @@ func (r *Router) ProcessMessage(ctx context.Context, queueMsg transport.QueueMes
 			UpdatedAt:   now,
 		}
 
-		return r.sendToSinkQueue(ctx, *msg)
+		return r.handleSLAExpiry(ctx, *msg, startTime)
 	}
 
 	if r.cfg.IsEndActor {
@@ -812,9 +798,39 @@ func (r *Router) ProcessMessage(ctx context.Context, queueMsg transport.QueueMes
 		}
 	}
 
+	// Guard against tight or expired SLA deadlines before calling the runtime.
+	//
+	// The SLA pre-check in ProcessMessage uses time.Now().After(deadline)
+	// with whole-second RFC3339 timestamps.  Between that check and here,
+	// the remaining SLA may have dropped to zero or near-zero.  A very
+	// small timeout would almost certainly trigger context.DeadlineExceeded
+	// inside CallRuntime, which sends the message to x-sump + os.Exit(1)
+	// instead of the correct x-sink route for SLA expiry.
+	//
+	// The 1-second margin also absorbs the up-to-1s truncation error from
+	// strftime's integer-second formatting of deadline timestamps.
+	const slaGuardMargin = 1 * time.Second
+	timeout := r.effectiveTimeout(msg)
+	slaExpiring := false
+	if deadline, ok := msg.ParseDeadline(); ok {
+		slaExpiring = time.Until(deadline) < slaGuardMargin
+	}
+	if timeout <= 0 || slaExpiring {
+		slog.Warn("SLA deadline too close, routing to x-sink",
+			"id", msg.ID, "deadline_at", msg.Status.DeadlineAt,
+			"effective_timeout", timeout)
+
+		now := time.Now().UTC().Format(time.RFC3339)
+		msg.Status.Phase = messages.PhaseFailed
+		msg.Status.Reason = messages.ReasonTimeout
+		msg.Status.UpdatedAt = now
+
+		return r.handleSLAExpiry(ctx, *msg, startTime)
+	}
+
 	slog.Info("Calling runtime", "id", msg.ID, "actor", r.cfg.ActorName)
 	runtimeStart := time.Now()
-	responses, err := r.runtimeClient.CallRuntime(ctx, updatedBody, r.effectiveTimeout(msg), onUpstream)
+	responses, err := r.runtimeClient.CallRuntime(ctx, updatedBody, timeout, onUpstream)
 	runtimeDuration := time.Since(runtimeStart)
 
 	if err != nil {
@@ -1004,6 +1020,25 @@ func (r *Router) routeResponse(ctx context.Context, id string, parentID *string,
 	}
 
 	return err
+}
+
+// handleSLAExpiry records SLA timeout metrics, notifies the gateway, and
+// routes the message to x-sink. The caller must set msg.Status fields
+// (Phase, Reason, etc.) before calling.
+func (r *Router) handleSLAExpiry(ctx context.Context, msg messages.Message, startTime time.Time) error {
+	if r.metrics != nil {
+		r.metrics.RecordMessageProcessed(r.actorName, "sla_expired")
+		r.metrics.RecordMessageFailed(r.actorName, "sla_timeout")
+		r.metrics.RecordProcessingDuration(r.actorName, time.Since(startTime))
+	}
+
+	if r.progressReporter != nil {
+		reportCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		_ = r.progressReporter.ReportFinalError(reportCtx, msg.ID, "SLA deadline expired")
+	}
+
+	return r.sendToSinkQueue(ctx, msg)
 }
 
 // sendToSinkQueue sends the original message to the x-sink queue.
