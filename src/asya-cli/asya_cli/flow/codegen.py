@@ -10,17 +10,9 @@ from asya_cli.flow.grouper import Router
 
 
 class CodeGenerator:
-    def __init__(
-        self,
-        flow_name: str,
-        routers: list[Router],
-        source_file: str,
-        output_file: str | None = None,
-        param_name: str = "p",
-    ):
+    def __init__(self, flow_name: str, routers: list[Router], source_file: str, output_file: str | None = None):
         self.flow_name = flow_name
         self.routers = routers
-        self.param_name = param_name
 
         # Compute relative path from output to source if both are provided
         if output_file:
@@ -134,7 +126,7 @@ class CodeGenerator:
         lines.append("    _next = []")
 
         if router.mutations:
-            lines.append(f"    {self.param_name} = payload")
+            lines.append("    p = payload")
             for mutation in router.mutations:
                 lines.append(f"    {mutation.code}")
 
@@ -144,7 +136,7 @@ class CodeGenerator:
                 lines.append(f'    _next.append(resolve("{name}"))')
 
         lines.append('    yield "SET", ".route.next[:0]", _next')
-        lines.append(f"    yield {self.param_name if router.mutations else 'payload'}")
+        lines.append(f"    yield {'p' if router.mutations else 'payload'}")
         lines.append("")
 
         return "\n".join(lines)
@@ -163,7 +155,7 @@ class CodeGenerator:
         lines = []
         lines.append(f"def {router.name}(payload: dict):")
         lines.append('    """Router for control flow and payload mutations"""')
-        lines.append(f"    {self.param_name} = payload")
+        lines.append("    p = payload")
         lines.append("    _next = []")
 
         for mutation in router.mutations:
@@ -220,7 +212,7 @@ class CodeGenerator:
         lines = []
         lines.append(f"def {router.name}(payload: dict):")
         lines.append(f'    """Fan-out router: dispatches to sub-agents and aggregator (line {fan_out.lineno})"""')
-        lines.append(f"    {self.param_name} = payload")
+        lines.append("    p = payload")
         lines.append("")
         lines.append('    origin_id = yield "GET", ".id"')
         lines.append('    _next_tail = yield "GET", ".route.next"')
@@ -264,7 +256,7 @@ class CodeGenerator:
             lines.append('    yield "SET", ".route.next", _next_tail')
 
         lines.append('    yield "SET", ".headers.x-asya-fan-in", {**_fan_in, "slice_index": 0}')
-        lines.append(f"    yield copy.deepcopy({self.param_name})")
+        lines.append("    yield copy.deepcopy(p)")
         lines.append("")
 
         # Indices 1..N: sub-agent slices
@@ -286,7 +278,7 @@ class CodeGenerator:
             lines.append('    """Loop-back router: re-inserts loop actors into route (guarded)"""')
         else:
             lines.append('    """Loop-back router: re-inserts loop actors into route"""')
-        lines.append(f"    {self.param_name} = payload")
+        lines.append("    p = payload")
         lines.append("    _next = []")
 
         for mutation in router.mutations:
@@ -358,7 +350,7 @@ class CodeGenerator:
         lines = []
         lines.append(f"def {router.name}(payload: dict):")
         lines.append('    """Except-dispatch router: matches error type and routes to handler"""')
-        lines.append(f"    {self.param_name} = payload")
+        lines.append("    p = payload")
         lines.append("    _next = []")
         lines.append('    _error_type = yield "GET", ".status.error.type"')
         lines.append('    _error_mro = yield "GET", ".status.error.mro"')
