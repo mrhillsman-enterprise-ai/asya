@@ -502,12 +502,6 @@ def _drive_generator(gen, ctx, on_fly=None, on_emit=None):
 
         if yielded is None:
             continue
-        elif isinstance(yielded, dict):
-            frame = _build_frame(yielded, ctx.input_route, ctx.snapshot())
-            if on_emit:
-                on_emit(frame)
-            else:
-                frames.append(frame)
         elif isinstance(yielded, tuple) and len(yielded) >= 2:
             verb = yielded[0]
             if verb == "FLY":
@@ -527,7 +521,12 @@ def _drive_generator(gen, ctx, on_fly=None, on_emit=None):
             else:
                 raise RuntimeError(f"ABI protocol error: unknown verb {verb!r}")
         else:
-            raise RuntimeError(f"ABI protocol error: unexpected yield type {type(yielded).__name__}")
+            # Any non-tuple, non-None value is a payload frame (dict, str, list, etc.)
+            frame = _build_frame(yielded, ctx.input_route, ctx.snapshot())
+            if on_emit:
+                on_emit(frame)
+            else:
+                frames.append(frame)
 
     return frames
 
@@ -551,12 +550,6 @@ async def _drive_async_generator(gen, ctx, on_fly=None, on_emit=None):
 
         if yielded is None:
             continue
-        elif isinstance(yielded, dict):
-            frame = _build_frame(yielded, ctx.input_route, ctx.snapshot())
-            if on_emit:
-                on_emit(frame)
-            else:
-                frames.append(frame)
         elif isinstance(yielded, tuple) and len(yielded) >= 2:
             verb = yielded[0]
             if verb == "FLY":
@@ -576,7 +569,12 @@ async def _drive_async_generator(gen, ctx, on_fly=None, on_emit=None):
             else:
                 raise RuntimeError(f"ABI protocol error: unknown verb {verb!r}")
         else:
-            raise RuntimeError(f"ABI protocol error: unexpected yield type {type(yielded).__name__}")
+            # Any non-tuple, non-None value is a payload frame (dict, str, list, etc.)
+            frame = _build_frame(yielded, ctx.input_route, ctx.snapshot())
+            if on_emit:
+                on_emit(frame)
+            else:
+                frames.append(frame)
 
     return frames
 
@@ -1225,7 +1223,9 @@ class _InvokeHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
         self.end_headers()
+        self.close_connection = True  # single-threaded server must not keep-alive SSE connections
 
         ctx = _AbiContext(envelope)
 
