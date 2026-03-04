@@ -3,6 +3,7 @@ package a2a
 import (
 	"context"
 	"testing"
+	"time"
 
 	a2alib "github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
@@ -88,6 +89,16 @@ func TestExecutorExecute(t *testing.T) {
 		Metadata:  map[string]any{"skill": "analyze"},
 	}
 
+	// Simulate task completion after a short delay so the blocking wait returns
+	go func() {
+		time.Sleep(100 * time.Millisecond) // Wait for task creation
+		_ = store.Update(types.TaskUpdate{
+			ID:        string(reqCtx.TaskID),
+			Status:    types.TaskStatusSucceeded,
+			Timestamp: time.Now(),
+		})
+	}()
+
 	mockQueue := &mockEventQueue{}
 	err := exec.Execute(ctx, reqCtx, mockQueue)
 	if err != nil {
@@ -103,9 +114,9 @@ func TestExecutorExecute(t *testing.T) {
 		t.Errorf("route.curr = %q, want %q", task.Route.Curr, "start-analysis")
 	}
 
-	// Verify event was written
-	if len(mockQueue.events) == 0 {
-		t.Fatal("expected at least one event written to queue")
+	// Verify events were written (submitted + terminal)
+	if len(mockQueue.events) < 2 {
+		t.Fatalf("expected at least 2 events (submitted + terminal), got %d", len(mockQueue.events))
 	}
 }
 
@@ -141,6 +152,83 @@ func TestExecutorCancel(t *testing.T) {
 
 	if len(mockQueue.events) == 0 {
 		t.Fatal("expected cancel event written to queue")
+	}
+}
+
+func TestExecutorCancelActiveTask(t *testing.T) {
+	reg := toolstore.NewInMemoryRegistry()
+	store := taskstore.NewStore()
+	exec := NewExecutor(nil, store, reg, "default")
+	ctx := context.Background()
+
+	taskID := a2alib.NewTaskID()
+	_ = store.Create(&types.Task{
+		ID:     string(taskID),
+		Status: types.TaskStatusRunning,
+	})
+
+	reqCtx := &a2asrv.RequestContext{
+		TaskID:    taskID,
+		ContextID: a2alib.NewContextID(),
+	}
+
+	mockQueue := &mockEventQueue{}
+	err := exec.Cancel(ctx, reqCtx, mockQueue)
+	if err != nil {
+		t.Fatalf("Cancel failed: %v", err)
+	}
+
+	task, _ := store.Get(string(taskID))
+	if task.Status != types.TaskStatusCanceled {
+		t.Errorf("task status = %q, want %q", task.Status, types.TaskStatusCanceled)
+	}
+
+	if len(mockQueue.events) == 0 {
+		t.Fatal("expected cancel event written to queue")
+	}
+}
+
+func TestExecutorCancelTerminalTask(t *testing.T) {
+	terminalStatuses := []types.TaskStatus{
+		types.TaskStatusSucceeded,
+		types.TaskStatusFailed,
+		types.TaskStatusCanceled,
+	}
+
+	for _, status := range terminalStatuses {
+		t.Run(string(status), func(t *testing.T) {
+			reg := toolstore.NewInMemoryRegistry()
+			store := taskstore.NewStore()
+			exec := NewExecutor(nil, store, reg, "default")
+			ctx := context.Background()
+
+			taskID := a2alib.NewTaskID()
+			_ = store.Create(&types.Task{
+				ID:     string(taskID),
+				Status: types.TaskStatusRunning,
+			})
+			// Store.Create resets status to pending, so update to the terminal state
+			_ = store.Update(types.TaskUpdate{
+				ID:        string(taskID),
+				Status:    status,
+				Timestamp: time.Now(),
+			})
+
+			reqCtx := &a2asrv.RequestContext{
+				TaskID:    taskID,
+				ContextID: a2alib.NewContextID(),
+			}
+
+			mockQueue := &mockEventQueue{}
+			err := exec.Cancel(ctx, reqCtx, mockQueue)
+			if err != a2alib.ErrTaskNotCancelable {
+				t.Fatalf("Cancel() error = %v, want %v", err, a2alib.ErrTaskNotCancelable)
+			}
+
+			if len(mockQueue.events) != 0 {
+				t.Fatal("expected no events written for terminal task")
+			}
+		})
 	}
 }
 
