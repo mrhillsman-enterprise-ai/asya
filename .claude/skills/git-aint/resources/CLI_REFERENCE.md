@@ -127,7 +127,7 @@ Usage: git aint summary [DIR] [OPTIONS]
 ```bash
 git aint summary                        # txt, full detail
 git aint summary --brief                # txt, compact (for hooks)
-git aint summary --output md            # markdown (for auto-summary.md)
+git aint summary --output md            # markdown (for auto-generated.md)
 git aint summary auth-rework            # single directory
 ```
 
