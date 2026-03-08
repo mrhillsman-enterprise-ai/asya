@@ -5,10 +5,10 @@ apiVersion: asya.sh/v1alpha1
 kind: AsyncActor
 metadata:
   name: postprocess
-  namespace: default
+  namespace: my-project
 spec:
   actor: postprocess
-  transport: rabbitmq
+  transport: sqs
 
   scaling:
     enabled: true

@@ -5,10 +5,10 @@ apiVersion: asya.sh/v1alpha1
 kind: AsyncActor
 metadata:
   name: fully-configured-actor
-  namespace: default
+  namespace: my-project
 spec:
   actor: fully-configured-actor
-  transport: rabbitmq
+  transport: sqs
 
   scaling:
     enabled: true

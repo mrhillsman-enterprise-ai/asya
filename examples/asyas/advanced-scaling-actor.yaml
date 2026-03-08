@@ -2,12 +2,12 @@ apiVersion: asya.sh/v1alpha1
 kind: AsyncActor
 metadata:
   name: advanced-scaling-actor
-  namespace: asya
+  namespace: my-project
   labels:
     app: advanced-scaling-actor
 spec:
   actor: advanced-scaling-actor
-  transport: rabbitmq
+  transport: sqs
 
   scaling:
     enabled: true

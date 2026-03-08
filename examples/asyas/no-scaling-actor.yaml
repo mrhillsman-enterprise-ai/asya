@@ -5,10 +5,10 @@ apiVersion: asya.sh/v1alpha1
 kind: AsyncActor
 metadata:
   name: fixed-replicas-actor
-  namespace: default
+  namespace: my-project
 spec:
   actor: fixed-replicas-actor
-  transport: rabbitmq
+  transport: sqs
 
   # Disable KEDA autoscaling
   scaling:
