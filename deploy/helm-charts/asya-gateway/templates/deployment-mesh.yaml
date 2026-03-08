@@ -57,13 +57,13 @@ spec:
                               -p {{ include "asya-gateway.databasePort" . }} \
                               -U {{ include "asya-gateway.databaseUsername" . }} \
                               -d {{ include "asya-gateway.databaseName" . }} \
-                              -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('tasks', 'task_updates', 'tools')")
+                              -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('tasks', 'task_updates')")
 
-          if [ "$TABLES_EXIST" -eq 3 ]; then
-            echo "[+] Database schema validated (tasks, task_updates, tools tables exist)"
+          if [ "$TABLES_EXIST" -eq 2 ]; then
+            echo "[+] Database schema validated (tasks, task_updates tables exist)"
           else
             echo "[-] Database schema validation failed!"
-            echo "[-] Expected tables: tasks, task_updates, tools"
+            echo "[-] Expected tables: tasks, task_updates"
             echo "[-] Found $TABLES_EXIST table(s)"
             echo "[-] Please ensure database migrations have been run successfully"
             exit 1
@@ -122,11 +122,11 @@ spec:
           {{- toYaml .Values.resources | nindent 12 }}
         {{- with .Values.volumeMounts }}
         volumeMounts:
-          {{- toYaml . | nindent 12 }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
       {{- with .Values.volumes }}
       volumes:
-        {{- toYaml . | nindent 8 }}
+      {{- toYaml . | nindent 6 }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

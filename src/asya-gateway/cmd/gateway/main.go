@@ -84,19 +84,21 @@ func main() {
 	slog.Info("Gateway uses standalone end actors for final status reporting",
 		"info", "Deploy x-sink and x-sump actors to handle end queues")
 
-	// Initialize tool registry from PostgreSQL
+	// Initialize tool registry from ConfigMap directory or in-memory fallback
 	var registry *toolstore.Registry
-	if pgStore, ok := taskStore.(*taskstore.PgStore); ok {
+	configPath := os.Getenv("ASYA_CONFIG_PATH")
+	if configPath != "" {
 		var err error
-		registry, err = toolstore.NewRegistry(ctx, pgStore.Pool())
+		registry, err = toolstore.NewRegistryFromDir(configPath)
 		if err != nil {
-			slog.Error("Failed to create DB-backed tool registry", "error", err)
+			slog.Error("Failed to load tool registry from ConfigMap", "path", configPath, "error", err)
 			os.Exit(1)
 		}
-		slog.Info("Using DB-backed tool registry")
+		slog.Info("Using ConfigMap-based tool registry", "path", configPath)
+		go toolstore.Watch(ctx, configPath, registry, 5*time.Second)
 	} else {
 		registry = toolstore.NewInMemoryRegistry()
-		slog.Info("Using in-memory tool registry")
+		slog.Info("Using in-memory tool registry (ASYA_CONFIG_PATH not set)")
 	}
 
 	// Create MCP server (reads tools from DB-backed registry)
@@ -204,7 +206,7 @@ func main() {
 	// Setup routes based on ASYA_GATEWAY_MODE
 	mux := http.NewServeMux()
 	mode := os.Getenv("ASYA_GATEWAY_MODE")
-	if err := buildRoutes(mux, mode, taskHandler, mcpServer, a2aRootHandler, cardProducer, registry, apiKey, mcpMiddleware, oauthSrv); err != nil {
+	if err := buildRoutes(mux, mode, taskHandler, mcpServer, a2aRootHandler, cardProducer, mcpMiddleware, oauthSrv); err != nil {
 		slog.Error("Invalid gateway mode", "error", err)
 		os.Exit(1)
 	}
@@ -272,16 +274,7 @@ func registerOAuthRoutes(mux *http.ServeMux, oauthSrv *oauth.Server) {
 	mux.HandleFunc("/oauth/token", oauthSrv.HandleToken)
 }
 
-func registerMeshRoutes(mux *http.ServeMux, taskHandler *mcp.Handler,
-	registry *toolstore.Registry, apiKey string) {
-	if registry != nil {
-		exposeHandler := toolstore.NewHandler(registry)
-		var exposeHTTPHandler http.Handler = http.HandlerFunc(exposeHandler.HandleExpose)
-		if apiKey != "" {
-			exposeHTTPHandler = a2a.APIKeyMiddleware(apiKey)(exposeHTTPHandler)
-		}
-		mux.Handle("/mesh/expose", exposeHTTPHandler)
-	}
+func registerMeshRoutes(mux *http.ServeMux, taskHandler *mcp.Handler) {
 	if taskHandler != nil {
 		mux.HandleFunc("/mesh/", func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(r.URL.Path, "/stream") {
@@ -304,7 +297,6 @@ func registerMeshRoutes(mux *http.ServeMux, taskHandler *mcp.Handler,
 
 func buildRoutes(mux *http.ServeMux, mode string, taskHandler *mcp.Handler,
 	mcpServer *mcp.Server, a2aHandler http.Handler, cardProducer *a2a.CardProducer,
-	registry *toolstore.Registry, apiKey string,
 	mcpMiddleware func(http.Handler) http.Handler, oauthSrv *oauth.Server) error {
 	if mcpMiddleware == nil {
 		mcpMiddleware = func(h http.Handler) http.Handler { return h }
@@ -314,11 +306,11 @@ func buildRoutes(mux *http.ServeMux, mode string, taskHandler *mcp.Handler,
 		registerAPIRoutes(mux, taskHandler, mcpServer, a2aHandler, cardProducer, mcpMiddleware)
 		registerOAuthRoutes(mux, oauthSrv)
 	case "mesh":
-		registerMeshRoutes(mux, taskHandler, registry, apiKey)
+		registerMeshRoutes(mux, taskHandler)
 	case "testing":
 		registerAPIRoutes(mux, taskHandler, mcpServer, a2aHandler, cardProducer, mcpMiddleware)
 		registerOAuthRoutes(mux, oauthSrv)
-		registerMeshRoutes(mux, taskHandler, registry, apiKey)
+		registerMeshRoutes(mux, taskHandler)
 	default:
 		return fmt.Errorf("ASYA_GATEWAY_MODE must be set to api|mesh|testing, got: %q", mode)
 	}
