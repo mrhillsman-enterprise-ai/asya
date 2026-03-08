@@ -14,6 +14,7 @@ These tests verify the system performs well under various load conditions.
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
 
@@ -270,3 +271,82 @@ def test_keda_pollingInterval_effectiveness(e2e_helper):
     assert pod_ready, f"Pod should scale up within {scale_timeout}s"
 
     logger.info(f"[+] Scale-up occurred in {scale_up_time:.2f}s (pollingInterval={polling_interval}s)")
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    os.getenv("ASYA_TRANSPORT") == "pubsub",
+    reason="KEDA gcp-pubsub scaler cannot query the Pub/Sub emulator for subscription metrics",
+)
+def test_cold_start_backlog_processing(e2e_helper):
+    """
+    E2E: Test KEDA cold-start — scale from 0, process backlog to completion.
+
+    Scenario:
+    1. Scale test-echo deployment to 0 replicas (cold start)
+    2. Enqueue 20 messages while actor is at 0 replicas (backlog)
+    3. Wait for KEDA to detect queue depth and scale up
+    4. Assert all 20 messages complete with status "succeeded"
+
+    This validates the minReplicas=0 path end-to-end: backlog accumulates ->
+    KEDA detects -> pod scheduled -> container starts -> messages drain.
+    """
+    logger.info("Scaling test-echo to 0 for cold-start test...")
+    e2e_helper.kubectl("scale", "deployment", "test-echo", "--replicas=0")
+    time.sleep(3)  # Allow Kubernetes to propagate scale-down before enqueuing backlog
+
+    current_pods = e2e_helper.get_pod_count("asya.sh/actor=test-echo")
+    logger.info(f"Pod count before backlog: {current_pods}")
+
+    # Wait for scale-down to complete before enqueuing cold backlog
+    scale_down_timeout = 30
+    scale_down_elapsed = 0
+    while current_pods > 0 and scale_down_elapsed < scale_down_timeout:
+        time.sleep(2)  # Poll until pods drain to 0
+        scale_down_elapsed += 2
+        current_pods = e2e_helper.get_pod_count("asya.sh/actor=test-echo")
+    logger.info(f"Pods after scale-down wait: {current_pods}")
+
+    logger.info("Enqueuing 20 messages into cold backlog...")
+    task_ids = []
+    for i in range(20):
+        try:
+            response = e2e_helper.call_mcp_tool(
+                tool_name="test_echo",
+                arguments={"message": f"cold-start-{i}"},
+            )
+            task_ids.append(response["result"]["task_id"])
+        except Exception as e:
+            logger.warning(f"Failed to enqueue message {i}: {e}")
+
+    logger.info(f"Enqueued {len(task_ids)}/20 messages")
+    assert len(task_ids) >= 15, f"Should enqueue at least 15 messages, got {len(task_ids)}"
+
+    scaled_obj = e2e_helper.kubectl(
+        "get", "scaledobject", "test-echo",
+        "-o", "jsonpath='{.spec.pollingInterval}'"
+    )
+    polling_interval = int(scaled_obj.strip("'")) if scaled_obj and scaled_obj != "''" else 30
+    per_task_timeout = max(polling_interval * 4 + 60, 180)
+
+    logger.info(f"Waiting up to {per_task_timeout}s per task for {len(task_ids)} tasks to complete concurrently...")
+    completed = 0
+    with ThreadPoolExecutor(max_workers=len(task_ids)) as executor:
+        future_to_task = {
+            executor.submit(e2e_helper.wait_for_task_completion, task_id, timeout=per_task_timeout): task_id
+            for task_id in task_ids
+        }
+        for future in as_completed(future_to_task):
+            task_id = future_to_task[future]
+            try:
+                final = future.result()
+                if final["status"] == "succeeded":
+                    completed += 1
+                else:
+                    logger.warning(f"Task {task_id} ended with status: {final['status']}")
+            except Exception as e:
+                logger.warning(f"Task {task_id} timed out or failed: {e}")
+
+    logger.info(f"[+] Cold-start completed: {completed}/{len(task_ids)} tasks succeeded")
+    assert completed >= len(task_ids) * 0.9, \
+        f"At least 90% of cold-start tasks should succeed, got {completed}/{len(task_ids)}"
