@@ -7,10 +7,7 @@ import (
 )
 
 func TestMergeFlavors_EmptyList(t *testing.T) {
-	result, err := MergeFlavors(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := MergeFlavors(nil)
 
 	if len(result) != 0 {
 		t.Errorf("expected empty map, got %v", result)
@@ -27,10 +24,7 @@ func TestMergeFlavors_SingleFlavor(t *testing.T) {
 		},
 	}
 
-	result, err := MergeFlavors(data)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := MergeFlavors(data)
 
 	want := map[string]interface{}{
 		"scaling": map[string]interface{}{
@@ -59,10 +53,7 @@ func TestMergeFlavors_ScalingFieldsMerge(t *testing.T) {
 		},
 	}
 
-	result, err := MergeFlavors(data)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := MergeFlavors(data)
 
 	scaling := result["scaling"].(map[string]interface{})
 
@@ -119,27 +110,24 @@ func TestMergeFlavors_EnvVarsMergeByName(t *testing.T) {
 		},
 	}
 
-	result, err := MergeFlavors(data)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := MergeFlavors(data)
 
 	envVars := getEnvVars(t, result)
+	// mergeByName deep-merges containers with same name, so env vars accumulate
 	if len(envVars) != 2 {
-		t.Fatalf("expected 2 env vars, got %d: %v", len(envVars), envVars)
+		t.Fatalf("expected 2 env vars (deep merge preserves both), got %d: %v", len(envVars), envVars)
 	}
 
-	envNames := make(map[string]string)
+	envMap := make(map[string]string)
 	for _, e := range envVars {
 		env := e.(map[string]interface{})
-		envNames[env["name"].(string)] = env["value"].(string)
+		envMap[env["name"].(string)] = env["value"].(string)
 	}
-
-	if envNames["FOO"] != "bar" {
-		t.Errorf("FOO: got %q, want %q", envNames["FOO"], "bar")
+	if envMap["FOO"] != "bar" {
+		t.Errorf("FOO: got %q, want %q", envMap["FOO"], "bar")
 	}
-	if envNames["BAZ"] != "qux" {
-		t.Errorf("BAZ: got %q, want %q", envNames["BAZ"], "qux")
+	if envMap["BAZ"] != "qux" {
+		t.Errorf("BAZ: got %q, want %q", envMap["BAZ"], "qux")
 	}
 }
 
@@ -185,10 +173,7 @@ func TestMergeFlavors_EnvVarOverrideByName(t *testing.T) {
 		},
 	}
 
-	result, err := MergeFlavors(data)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := MergeFlavors(data)
 
 	envVars := getEnvVars(t, result)
 	if len(envVars) != 1 {
@@ -248,27 +233,27 @@ func TestMergeFlavors_ValueFromSecretKeyRef(t *testing.T) {
 		},
 	}
 
-	result, err := MergeFlavors(data)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := MergeFlavors(data)
 
 	envVars := getEnvVars(t, result)
+	// mergeByName deep-merges containers with same name, so env vars accumulate
 	if len(envVars) != 2 {
-		t.Fatalf("expected 2 env vars, got %d", len(envVars))
+		t.Fatalf("expected 2 env vars (deep merge preserves both), got %d", len(envVars))
 	}
 
-	envMap := make(map[string]map[string]interface{})
+	envMap := make(map[string]interface{})
 	for _, e := range envVars {
 		env := e.(map[string]interface{})
 		envMap[env["name"].(string)] = env
 	}
 
-	if envMap["PLAIN_VAR"]["value"] != "hello" {
-		t.Errorf("PLAIN_VAR value mismatch")
+	plainVar := envMap["PLAIN_VAR"].(map[string]interface{})
+	if plainVar["value"] != "hello" {
+		t.Errorf("PLAIN_VAR: got %q, want %q", plainVar["value"], "hello")
 	}
 
-	secretRef := envMap["SECRET_VAR"]["valueFrom"].(map[string]interface{})["secretKeyRef"].(map[string]interface{})
+	secretVar := envMap["SECRET_VAR"].(map[string]interface{})
+	secretRef := secretVar["valueFrom"].(map[string]interface{})["secretKeyRef"].(map[string]interface{})
 	if secretRef["name"] != "my-secret" || secretRef["key"] != "api-key" {
 		t.Errorf("SECRET_VAR secretKeyRef mismatch: %v", secretRef)
 	}
@@ -313,10 +298,7 @@ func TestMergeFlavors_TolerationsReplacedAtomically(t *testing.T) {
 		},
 	}
 
-	result, err := MergeFlavors(data)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := MergeFlavors(data)
 
 	tolerations := result["workload"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})["tolerations"].([]interface{})
 
@@ -357,10 +339,7 @@ func TestMergeFlavors_TolerationsCombinedInSingleFlavor(t *testing.T) {
 		},
 	}
 
-	result, err := MergeFlavors(data)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := MergeFlavors(data)
 
 	tolerations := result["workload"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})["tolerations"].([]interface{})
 
@@ -411,10 +390,7 @@ func TestMergeFlavors_ResourceOverride(t *testing.T) {
 		},
 	}
 
-	result, err := MergeFlavors(data)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := MergeFlavors(data)
 
 	containers := result["workload"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})["containers"].([]interface{})
 	container := containers[0].(map[string]interface{})
@@ -428,7 +404,7 @@ func TestMergeFlavors_ResourceOverride(t *testing.T) {
 	}
 }
 
-func TestApplyStrategicMerge_ActorInlineWins(t *testing.T) {
+func TestDeepMerge_ActorInlineWins(t *testing.T) {
 	flavorData := []map[string]interface{}{
 		{
 			"scaling": map[string]interface{}{
@@ -459,10 +435,7 @@ func TestApplyStrategicMerge_ActorInlineWins(t *testing.T) {
 		},
 	}
 
-	merged, err := MergeFlavors(flavorData)
-	if err != nil {
-		t.Fatal(err)
-	}
+	merged := MergeFlavors(flavorData)
 
 	actorSpec := map[string]interface{}{
 		"scaling": map[string]interface{}{
@@ -492,10 +465,7 @@ func TestApplyStrategicMerge_ActorInlineWins(t *testing.T) {
 		},
 	}
 
-	result, err := ApplyStrategicMerge(merged, actorSpec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := DeepMerge(merged, actorSpec)
 
 	// Actor's minReplicas=2 should override flavor's minReplicas=1
 	scaling := result["scaling"].(map[string]interface{})
@@ -507,6 +477,7 @@ func TestApplyStrategicMerge_ActorInlineWins(t *testing.T) {
 		t.Errorf("cooldownPeriod: got %v, want 600 (should be preserved from flavor)", scaling["cooldownPeriod"])
 	}
 
+	// mergeByName deep-merges containers with same name, so env vars accumulate
 	envVars := getEnvVars(t, result)
 
 	envMap := make(map[string]string)
@@ -521,13 +492,13 @@ func TestApplyStrategicMerge_ActorInlineWins(t *testing.T) {
 	if envMap["LOG_LEVEL"] != "DEBUG" {
 		t.Errorf("LOG_LEVEL: got %q, want %q (actor should override)", envMap["LOG_LEVEL"], "DEBUG")
 	}
-	// Flavor's FLAVOR_VAR should be preserved
-	if envMap["FLAVOR_VAR"] != "from-flavor" {
-		t.Errorf("FLAVOR_VAR: got %q, want %q (should be preserved from flavor)", envMap["FLAVOR_VAR"], "from-flavor")
-	}
 	// Actor's ASYA_HANDLER should be present
 	if envMap["ASYA_HANDLER"] != "model.inference" {
 		t.Errorf("ASYA_HANDLER: got %q, want %q", envMap["ASYA_HANDLER"], "model.inference")
+	}
+	// FLAVOR_VAR is preserved (deep merge keeps flavor env vars alongside actor env vars)
+	if envMap["FLAVOR_VAR"] != "from-flavor" {
+		t.Errorf("FLAVOR_VAR: got %q, want %q (should be preserved from flavor)", envMap["FLAVOR_VAR"], "from-flavor")
 	}
 }
 

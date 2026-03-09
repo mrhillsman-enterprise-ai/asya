@@ -9,15 +9,9 @@ import (
 	"github.com/crossplane/function-sdk-go/request"
 	"github.com/crossplane/function-sdk-go/resource"
 	"github.com/crossplane/function-sdk-go/response"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
 const (
-	// ContextKeyResolvedSpec is the context key where the resolved (merged) spec is stored.
-	// Downstream composition functions (e.g., Go templates) read from this key
-	// instead of the raw XR spec when flavors are active.
-	ContextKeyResolvedSpec = "asya/resolved-spec"
-
 	// EnvConfigAPIVersion is the Crossplane EnvironmentConfig API version.
 	EnvConfigAPIVersion = "apiextensions.crossplane.io/v1beta1"
 
@@ -27,6 +21,18 @@ const (
 	// FlavorLabel is the label key used to identify flavor EnvironmentConfigs.
 	FlavorLabel = "asya.sh/flavor"
 )
+
+// infrastructureFields are spec fields managed by the composition pipeline,
+// not by flavors. These are excluded from the actor-wins override.
+var infrastructureFields = map[string]bool{
+	"actor":             true,
+	"transport":         true,
+	"flavors":           true,
+	"region":            true,
+	"gcpProject":        true,
+	"providerConfigRef": true,
+	"irsa":              true,
+}
 
 // Function implements the function-asya-flavors composition function.
 type Function struct {
@@ -39,9 +45,9 @@ type Function struct {
 // The function operates in two phases within Crossplane's reconciliation loop:
 //  1. Request phase: reads spec.flavors from the XR and sets resource requirements
 //     for each flavor's EnvironmentConfig (matched by label asya.sh/flavor=<name>).
-//  2. Merge phase: once Crossplane provides the EnvironmentConfigs, applies strategic
-//     merge patch in spec.flavors order, then applies the actor's inline spec as the
-//     final override. The resolved spec is written to the context key asya/resolved-spec.
+//  2. Merge phase: once Crossplane provides the EnvironmentConfigs, applies deep
+//     merge in spec.flavors order, then applies the actor's inline spec as the
+//     final override. The resolved spec is written back onto the XR's desired state.
 func (f *Function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) (*fnv1.RunFunctionResponse, error) {
 	f.log.Info("Running function", "tag", req.GetMeta().GetTag())
 
@@ -86,25 +92,42 @@ func (f *Function) run(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionRespon
 
 	flavorData := extractFlavorData(required, flavors, f.log)
 
-	merged, err := MergeFlavors(flavorData)
-	if err != nil {
-		return errors.Wrapf(err, "cannot merge flavors")
+	merged := MergeFlavors(flavorData)
+
+	// Filter infrastructure fields from flavor data
+	for k := range infrastructureFields {
+		delete(merged, k)
 	}
 
 	actorSpec := extractActorInlineSpec(oxr)
 	if actorSpec != nil {
-		merged, err = ApplyStrategicMerge(merged, actorSpec)
-		if err != nil {
-			return errors.Wrapf(err, "cannot apply actor inline spec override")
+		merged = DeepMerge(merged, actorSpec)
+	}
+
+	dxr, err := request.GetDesiredCompositeResource(req)
+	if err != nil {
+		return errors.Wrapf(err, "cannot get desired composite resource")
+	}
+
+	// Build complete spec from infrastructure fields + resolved flavors.
+	// Only infrastructure fields are carried from observed spec to avoid
+	// "sticky" flavor data: if a flavor is removed from spec.flavors,
+	// its fields should not persist from the previous observed state.
+	oxrSpec, _ := oxr.Resource.Object["spec"].(map[string]interface{})
+	infraOnly := make(map[string]interface{})
+	for k := range infrastructureFields {
+		if v, ok := oxrSpec[k]; ok {
+			infraOnly[k] = v
 		}
 	}
+	completeSpec := DeepMerge(infraOnly, merged)
 
-	value, err := structpb.NewValue(merged)
-	if err != nil {
-		return errors.Wrapf(err, "cannot convert resolved spec to context value")
+	dxr.Resource.Object["spec"] = completeSpec
+
+	if err := response.SetDesiredCompositeResource(rsp, dxr); err != nil {
+		return errors.Wrapf(err, "cannot set desired composite resource")
 	}
 
-	response.SetContextKey(rsp, ContextKeyResolvedSpec, value)
 	response.Normalf(rsp, "Applied %d flavors: %v", len(flavors), flavors)
 	f.log.Info("Flavors applied", "count", len(flavors))
 
@@ -215,9 +238,9 @@ func extractFlavorData(required map[string][]resource.Required, flavors []string
 	return result
 }
 
-// extractActorInlineSpec returns the flavor-mergeable fields from the XR spec
-// (scaling, workload). These are applied as the final override so the actor's
-// own configuration always wins over flavor values.
+// extractActorInlineSpec returns all flavor-mergeable fields from the XR spec.
+// Infrastructure fields are excluded. These are applied as the final override
+// so the actor's own configuration always wins over flavor values.
 func extractActorInlineSpec(oxr *resource.Composite) map[string]interface{} {
 	spec, ok := oxr.Resource.Object["spec"].(map[string]interface{})
 	if !ok {
@@ -225,9 +248,9 @@ func extractActorInlineSpec(oxr *resource.Composite) map[string]interface{} {
 	}
 
 	result := make(map[string]interface{})
-	for _, field := range []string{"scaling", "workload"} {
-		if v, ok := spec[field]; ok {
-			result[field] = v
+	for k, v := range spec {
+		if !infrastructureFields[k] {
+			result[k] = v
 		}
 	}
 
