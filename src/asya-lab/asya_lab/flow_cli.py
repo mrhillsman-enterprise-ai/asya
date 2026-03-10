@@ -42,9 +42,10 @@ def _stamp_manifests(
         return
 
     flow_name = flow_function.replace("_", "-")
-    click.echo(f"[+] Using flow name '{flow_name}'")
 
-    config_loader = ConfigLoader()
+    config_loader = ConfigLoader(
+        dynamic_values={"flow_function": flow_function, "flow_name": flow_name, "flow": flow_name}
+    )
     config = config_loader.load(source_path.parent)
 
     # Determine manifest output directory
