@@ -95,6 +95,10 @@ Run with fail-fast: `make trigger-tests PYTEST_OPTS="-vv -x" PROFILE="sqs-s3" 2>
    `-p no:xdist` when debugging
 5. **CI-only failures are usually namespace/credential issues** — local dev often papers over these because
    secrets are created ad-hoc; CI is strict about what exists where
+6. **AsyncActor manifest field additions cascade across test files** — when a new required field is added to
+   AsyncActor specs (e.g. `compositionSelector`), grep ALL test files for `kind: AsyncActor` or `transport:`
+   to find every inline manifest; missing even one causes failures in seemingly unrelated suites
+   (e.g. fixing `test_crossplane_e2e.py` but missing `test_secret_injection_e2e.py`)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed test structure, Makefile patterns, and Docker Compose
 profile assembly.
